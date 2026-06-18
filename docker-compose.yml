@@ -1,0 +1,176 @@
+version: "3.8"
+
+services:
+  api-server:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: acp-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=false
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=acp_user
+      - DB_PASSWORD=acp_password
+      - DB_NAME=auto_content_platform
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - PLAYWRIGHT_CDP_URL=http://playwright-1:9222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+    networks:
+      - acp-network
+    volumes:
+      - ./storage_states:/app/storage_states
+      - ./screenshots:/app/screenshots
+      - ./error_screenshots:/app/error_screenshots
+    command: >
+      sh -c "sleep 5 && alembic upgrade head && uvicorn backend.main:app --host 0.0.0.0 --port 8000"
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: acp-worker
+    restart: unless-stopped
+    environment:
+      - DEBUG=false
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=acp_user
+      - DB_PASSWORD=acp_password
+      - DB_NAME=auto_content_platform
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PLAYWRIGHT_CDP_URL=http://playwright-1:9222
+    depends_on:
+      - api-server
+      - redis
+    networks:
+      - acp-network
+    volumes:
+      - ./storage_states:/app/storage_states
+      - ./screenshots:/app/screenshots
+    command: celery -A backend.tasks.content_tasks worker -l info -c 4 -Q acp,celery
+
+  celery-beat:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: acp-beat
+    restart: unless-stopped
+    environment:
+      - DEBUG=false
+      - DB_HOST=postgres
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+    networks:
+      - acp-network
+    command: celery -A backend.tasks.content_tasks beat -l info
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: acp-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=acp_user
+      - POSTGRES_PASSWORD=acp_password
+      - POSTGRES_DB=auto_content_platform
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - acp-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U acp_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: acp-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    networks:
+      - acp-network
+
+  minio:
+    image: minio/minio:latest
+    container_name: acp-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    networks:
+      - acp-network
+
+  playwright-1:
+    build:
+      context: .
+      dockerfile: playwright-node/Dockerfile
+    container_name: acp-playwright-1
+    restart: unless-stopped
+    environment:
+      - DISPLAY=:99
+      - PLAYWRIGHT_MODE=playwright
+    ports:
+      - "9222:9222"
+      - "5900:5900"
+    networks:
+      - acp-network
+    shm_size: 2gb
+    volumes:
+      - ./storage_states:/app/storage_states
+      - ./screenshots:/app/screenshots
+
+  playwright-2:
+    build:
+      context: .
+      dockerfile: playwright-node/Dockerfile
+    container_name: acp-playwright-2
+    restart: unless-stopped
+    environment:
+      - DISPLAY=:99
+      - PLAYWRIGHT_MODE=playwright
+    ports:
+      - "9223:9222"
+      - "5901:5900"
+    networks:
+      - acp-network
+    shm_size: 2gb
+    volumes:
+      - ./storage_states:/app/storage_states
+      - ./screenshots:/app/screenshots
+
+networks:
+  acp-network:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
