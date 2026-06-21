@@ -66,6 +66,9 @@ async def _build_product_info(db, product_id: int, company_id: int = None, conte
         result = await db.execute(select(Company).where(Company.id == company_id))
         company = result.scalar_one_or_none()
 
+    # 混合模式自动收集的公司产品名（product/company 模式用默认值）
+    combined_product_name = ""
+
     # 2. 按模式合并知识库 Markdown
     kb_parts = []
 
@@ -104,17 +107,32 @@ async def _build_product_info(db, product_id: int, company_id: int = None, conte
 
     elif content_mode == "mixed":
         # ── 混合模式：先做广告密度决策，再决定是否加载产品知识库 ──
+        #    混合模式不需要用户选产品——系统自动拉取该公司所有产品
         from backend.services.ad_ratio_analyzer import ad_ratio_analyzer, AdRatioDecision
+        from backend.models.models import Product as ProductModel
+
+        # 自动查询该公司旗下所有产品
+        company_products: list = []
+        if company_id:
+            prod_result = await db.execute(
+                select(ProductModel).where(ProductModel.company_id == company_id)
+            )
+            company_products = prod_result.scalars().all()
+
+        # 用公司所有产品名做广告密度关键词匹配
+        all_product_names = [p.name for p in company_products if p.name] if company_products else []
+        combined_product_name = "、".join(all_product_names) if all_product_names else ""
 
         # 自主分析近期文章广告密度（不由用户控制）
         ad_decision: AdRatioDecision = await ad_ratio_analyzer.analyze(
             db=db,
             company_id=company_id,
-            product_id=product_id,
-            product_name=product.name if product else "",
+            product_id=None,  # 混合模式不限定单个产品
+            product_name=combined_product_name,  # 用所有产品名匹配
         )
         logger.info(
-            f"[AdRatio:mixed] 决策=include_product:{ad_decision.include_product} "
+            f"[AdRatio:mixed] 公司产品={all_product_names} | "
+            f"决策=include_product:{ad_decision.include_product} "
             f"suppress:{ad_decision.suppress_product_name} | {ad_decision.reason}"
         )
 
@@ -127,18 +145,19 @@ async def _build_product_info(db, product_id: int, company_id: int = None, conte
                 if doc.content:
                     kb_parts.append(f"## [公司主体] {doc.title}\n{doc.content}")
 
-        # 仅当决策允许时才加载产品知识库
-        if product_id and ad_decision.include_product:
-            prod_docs = (await db.execute(
-                select(KnowledgeBaseDoc).where(KnowledgeBaseDoc.product_id == product_id)
-            )).scalars().all()
-            for doc in prod_docs:
-                if doc.content:
-                    kb_parts.append(f"## [产品补充] {doc.title}\n{doc.content}")
+        # 仅当决策允许时才加载所有公司产品的知识库
+        if ad_decision.include_product and company_products:
+            for prod in company_products:
+                prod_docs = (await db.execute(
+                    select(KnowledgeBaseDoc).where(KnowledgeBaseDoc.product_id == prod.id)
+                )).scalars().all()
+                for doc in prod_docs:
+                    if doc.content:
+                        kb_parts.append(f"## [产品补充-{prod.name}] {doc.title}\n{doc.content}")
 
         logger.info(
-            f"[KB:mixed] company_id={company_id}, product_id={product_id}, "
-            f"加载产品KB={product_id and ad_decision.include_product}, "
+            f"[KB:mixed] company_id={company_id}, 公司产品={len(company_products)}个, "
+            f"加载产品KB={ad_decision.include_product and bool(company_products)}, "
             f"共 {len(kb_parts)} 个文档片段"
         )
 
@@ -198,8 +217,12 @@ async def _build_product_info(db, product_id: int, company_id: int = None, conte
         "tone_keywords": tone,
         # 额外字段（可在 prompt 模板中引用）
         "company_name": company.name if company else "",
-        # mixed 决策不引入产品时，product_name 置空防止 AI 主动提及
-        "product_name": (product.name if product else "") if _include_product_fields else "",
+        # 产品名：非混合模式用 product.name；混合模式用公司所有产品名
+        "product_name": (
+            (product.name if product else "")
+            if content_mode != "mixed"
+            else (combined_product_name if _include_product_fields else "")
+        ),
         "content_mode": content_mode,
     }
 
@@ -212,7 +235,7 @@ async def _build_product_info(db, product_id: int, company_id: int = None, conte
             f"企业文化、技术实力等，不专注于单一产品推介。"
         )
     elif content_mode == "mixed":
-        prod_name = product.name if product else ""
+        prod_name = combined_product_name or "旗下产品"
         try:
             _ad = ad_decision  # type: ignore[name-defined]
         except NameError:

@@ -219,7 +219,7 @@
           <div style="margin-top:6px;font-size:12px;color:var(--text-muted)">
             <span v-if="genForm.content_mode==='product'">以产品为主体，深度推介产品特性与卖点</span>
             <span v-else-if="genForm.content_mode==='company'">以品牌/公司为主体，展示企业形象与行业地位</span>
-            <span v-else>公司为主（70%）+ 产品辅助引用（30%），品牌背书型内容</span>
+            <span v-else>以品牌为主体，系统自主判断是否引用产品（基于历史广告密度分析）</span>
           </div>
         </el-form-item>
 
@@ -237,19 +237,19 @@
           </el-select>
         </el-form-item>
 
-        <!-- 选择产品（纯产品必填；混合可选） -->
+        <!-- 选择产品（混合模式不显示，由系统自主决策） -->
         <el-form-item
-          :label="genForm.content_mode === 'mixed' ? '关联产品' : '选择产品'"
-          :required="genForm.content_mode === 'product'"
+          v-if="genForm.content_mode !== 'mixed'"
+          label="选择产品"
+          required
         >
           <el-select
             v-model="genForm.product_id"
             style="width:100%"
             filterable
-            :placeholder="genForm.content_mode === 'mixed' ? '可选，不选则仅用公司知识库' : '选择产品'"
-            :clearable="genForm.content_mode !== 'product'"
+            placeholder="选择产品"
           >
-            <el-option v-for="p in filteredProducts" :key="p.id" :label="p.name" :value="p.id" />
+            <el-option v-for="p in products" :key="p.id" :label="p.name" :value="p.id" />
           </el-select>
         </el-form-item>
 
