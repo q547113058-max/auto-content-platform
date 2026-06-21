@@ -8,9 +8,9 @@
 决策逻辑：
   ┌──────────────────────────────────────────┐
   │ 近 N 篇中"含产品"文章占比  →  本篇决策  │
-  │  < AD_RATIO_LOW   (30%)  →  可以引入产品  │
-  │  AD_RATIO_LOW ~ HIGH     →  随机/权重引入 │
-  │  > AD_RATIO_HIGH  (60%)  →  本篇纯公司   │
+  │  < AD_RATIO_LOW   (15%)  →  可以引入产品  │
+  │  AD_RATIO_LOW ~ HIGH     →  允许但压低提及 │
+  │  ≥ AD_RATIO_HIGH  (30%)  →  本篇纯公司   │
   └──────────────────────────────────────────┘
 
 "含产品"的判断：
@@ -27,8 +27,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
 
 # 调节参数 — 可在 config 中覆盖
-AD_RATIO_LOW = 0.30    # 低于此比率 → 允许引入产品
-AD_RATIO_HIGH = 0.60   # 高于此比率 → 本篇纯公司
+AD_RATIO_LOW = 0.15    # 低于此比率 → 正常引入产品
+AD_RATIO_HIGH = 0.30   # 达到此比率 → 本篇纯公司
 LOOKBACK_COUNT = 10    # 回溯最近多少篇 mixed 模式文章
 MIN_SAMPLE = 3         # 样本不足时放宽决策（默认允许）
 AD_DENSITY_THRESHOLD = 0.08  # 单篇文章中产品相关词占比超过此值视为"含广告"
