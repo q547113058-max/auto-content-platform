@@ -103,8 +103,22 @@ async def _build_product_info(db, product_id: int, company_id: int = None, conte
         logger.info(f"[KB:company] company_id={company_id}, 共 {len(kb_parts)} 个文档片段")
 
     elif content_mode == "mixed":
-        # ── 混合模式：公司知识库为主体，产品知识库为补充 ──
-        # 先放公司（优先级高，AI 会更关注前面的内容）
+        # ── 混合模式：先做广告密度决策，再决定是否加载产品知识库 ──
+        from backend.services.ad_ratio_analyzer import ad_ratio_analyzer, AdRatioDecision
+
+        # 自主分析近期文章广告密度（不由用户控制）
+        ad_decision: AdRatioDecision = await ad_ratio_analyzer.analyze(
+            db=db,
+            company_id=company_id,
+            product_id=product_id,
+            product_name=product.name if product else "",
+        )
+        logger.info(
+            f"[AdRatio:mixed] 决策=include_product:{ad_decision.include_product} "
+            f"suppress:{ad_decision.suppress_product_name} | {ad_decision.reason}"
+        )
+
+        # 公司知识库始终加载（公司永远是主体）
         if company_id:
             comp_docs = (await db.execute(
                 select(KnowledgeBaseDoc).where(KnowledgeBaseDoc.company_id == company_id)
@@ -113,8 +127,8 @@ async def _build_product_info(db, product_id: int, company_id: int = None, conte
                 if doc.content:
                     kb_parts.append(f"## [公司主体] {doc.title}\n{doc.content}")
 
-        # 再追加产品（辅助信息）
-        if product_id:
+        # 仅当决策允许时才加载产品知识库
+        if product_id and ad_decision.include_product:
             prod_docs = (await db.execute(
                 select(KnowledgeBaseDoc).where(KnowledgeBaseDoc.product_id == product_id)
             )).scalars().all()
@@ -122,7 +136,11 @@ async def _build_product_info(db, product_id: int, company_id: int = None, conte
                 if doc.content:
                     kb_parts.append(f"## [产品补充] {doc.title}\n{doc.content}")
 
-        logger.info(f"[KB:mixed] company_id={company_id}, product_id={product_id}, 共 {len(kb_parts)} 个文档片段")
+        logger.info(
+            f"[KB:mixed] company_id={company_id}, product_id={product_id}, "
+            f"加载产品KB={product_id and ad_decision.include_product}, "
+            f"共 {len(kb_parts)} 个文档片段"
+        )
 
     # 3. 解析结构化字段
     merged_raw = "\n\n".join(kb_parts)
@@ -159,19 +177,29 @@ async def _build_product_info(db, product_id: int, company_id: int = None, conte
         main_category = category
 
     # 6. 构建 product_info（兼容现有 prompt 模板的占位符）
+    #    mixed 模式：若决策不引入产品，则产品相关字段清空，避免 AI 凭字段内容写出产品推销
+    _include_product_fields = True
+    if content_mode == "mixed":
+        # ad_decision 在上面的 elif 块中已赋值，此处通过局部变量传递
+        try:
+            _include_product_fields = ad_decision.include_product  # type: ignore[name-defined]
+        except NameError:
+            _include_product_fields = True  # 兜底
+
     product_info = {
         "name": main_name,
         "category": main_category,
-        "price": kb_structured.get("price", ""),
-        "key_ingredients": kb_structured.get("key_ingredients", ""),
-        "claims": kb_structured.get("claims", ""),
-        "key_points": kb_structured.get("key_points", ""),
+        "price": kb_structured.get("price", "") if _include_product_fields else "",
+        "key_ingredients": kb_structured.get("key_ingredients", "") if _include_product_fields else "",
+        "claims": kb_structured.get("claims", "") if _include_product_fields else "",
+        "key_points": kb_structured.get("key_points", "") if _include_product_fields else "",
         "target_audience": kb_structured.get("target_audience", ""),
         "industry_context": kb_structured.get("industry_context", ""),
         "tone_keywords": tone,
         # 额外字段（可在 prompt 模板中引用）
         "company_name": company.name if company else "",
-        "product_name": product.name if product else "",
+        # mixed 决策不引入产品时，product_name 置空防止 AI 主动提及
+        "product_name": (product.name if product else "") if _include_product_fields else "",
         "content_mode": content_mode,
     }
 
@@ -185,18 +213,63 @@ async def _build_product_info(db, product_id: int, company_id: int = None, conte
         )
     elif content_mode == "mixed":
         prod_name = product.name if product else ""
-        mode_instruction = (
-            f"\n\n【生成模式：公司为主 + 产品辅助混合内容】\n"
-            f"本次内容以「{main_name}」品牌为主体（占内容 70%+），"
-            f"自然带出旗下产品「{prod_name}」作为佐证（占 30% 以内）。"
-            f"重心在于展示品牌综合实力，产品信息仅做自然引用，不做重点推销。"
-        )
+        try:
+            _ad = ad_decision  # type: ignore[name-defined]
+        except NameError:
+            from backend.services.ad_ratio_analyzer import AdRatioDecision
+            _ad = AdRatioDecision(
+                include_product=True, ad_ratio=0.0, sample_count=0,
+                reason="无历史数据", product_articles=0, suppress_product_name=False
+            )
+
+        if not _ad.include_product:
+            # 广告过多 → 彻底不引入产品，指令等同纯公司
+            mode_instruction = (
+                f"\n\n【生成模式：混合（本篇纯公司）】\n"
+                f"系统检测到近期内容中产品/广告比例过高（{_ad.ad_ratio:.0%}），"
+                f"本篇内容以「{main_name}」品牌为主体，"
+                f"不提及具体产品名称和产品功能，专注品牌形象、行业见解、企业文化等主题。\n"
+                f"禁止出现任何产品推销、购买引导、产品参数介绍等内容。"
+            )
+        elif _ad.suppress_product_name:
+            # 中间区间 → 允许引入但严格控制产品比重
+            mode_instruction = (
+                f"\n\n【生成模式：混合（产品轻描述）】\n"
+                f"系统检测到近期产品内容占比适中（{_ad.ad_ratio:.0%}），"
+                f"本篇以「{main_name}」品牌为主体（不少于全文 80%），"
+                f"可在结尾处轻描述旗下产品「{prod_name}」一次（不超过 50 字），"
+                f"严禁出现购买引导、价格、促销等广告语。"
+            )
+        else:
+            # 广告稀少 → 正常混合，可以自然引入产品
+            mode_instruction = (
+                f"\n\n【生成模式：混合（正常）】\n"
+                f"本篇以「{main_name}」品牌为主体（占内容 70%+），"
+                f"可自然带出旗下产品「{prod_name}」作为佐证（不超过全文 30%）。"
+                f"重心在于展示品牌综合实力，产品信息仅做自然引用，不做重点推销。"
+            )
+
+    # 将广告密度决策附加到返回值（供 generate_content_task 写入 generation_params）
+    ad_decision_meta = None
+    if content_mode == "mixed":
+        try:
+            ad_decision_meta = {   # type: ignore[name-defined]
+                "include_product": _ad.include_product,
+                "suppress_product_name": _ad.suppress_product_name,
+                "ad_ratio": round(_ad.ad_ratio, 3),
+                "sample_count": _ad.sample_count,
+                "product_articles": _ad.product_articles,
+                "reason": _ad.reason,
+            }
+        except NameError:
+            pass
 
     return {
         "product_info": product_info,
         "mode_instruction": mode_instruction,
         "product": product,
         "company": company,
+        "ad_decision_meta": ad_decision_meta,
     }
 
 
@@ -236,6 +309,7 @@ async def generate_content_task(
         mode_instruction = ctx["mode_instruction"]
         product = ctx["product"]
         company = ctx["company"]
+        ad_decision_meta = ctx.get("ad_decision_meta")  # 混合模式广告密度决策元数据
 
         # 注入模式指令到 override_prompt
         effective_override = override_prompt or ""
@@ -355,6 +429,8 @@ async def generate_content_task(
                     "image_urls": image_urls,
                     "image_markers": [(p, d) for p, d in image_markers],
                     "content_mode": content_mode,
+                    # 混合模式广告密度决策记录（便于审计和调试）
+                    "ad_ratio_decision": ad_decision_meta,
                 },
                 status="draft",
             )
