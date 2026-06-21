@@ -7,7 +7,7 @@ from loguru import logger
 from backend.config import settings
 from backend.models.database import AsyncSessionLocal
 from backend.models.models import (
-    Content, Product, OptimizationChange, KnowledgeBaseDoc
+    Content, Product, Company, OptimizationChange, KnowledgeBaseDoc
 )
 from sqlalchemy import select
 
@@ -39,88 +39,235 @@ def _get_celery():
         return None
 
 
-# ==================== 主任务函数（直接调用） ====================
+# ==================== 三模式知识库构建辅助函数 ====================
 
-async def generate_content_task(product_id: int, platforms: list, override_prompt: str = None, topic_category: str = None):
-    """AI 内容生成 — 一次输入，全平台适配"""
-    logger.info(f"[Task] 生成内容: product_id={product_id}, platforms={platforms}, topic={topic_category}")
+async def _build_product_info(db, product_id: int, company_id: int = None, content_mode: str = "product") -> dict:
+    """
+    按 content_mode 从知识库构建 product_info 字典。
 
-    async with AsyncSessionLocal() as db:
+    content_mode:
+      - product  : 仅加载产品级知识库（原逻辑）
+      - company  : 仅加载公司级知识库，主体信息来自 Company
+      - mixed    : 公司知识库为主体 + 产品知识库补充（公司为主，产品为辅）
+    """
+    from backend.services.kb_parser import parse_knowledge_base
+
+    product = None
+    company = None
+
+    # 1. 加载产品和公司基础信息
+    if product_id:
         result = await db.execute(select(Product).where(Product.id == product_id))
         product = result.scalar_one_or_none()
-        if not product:
-            logger.error(f"产品 {product_id} 不存在")
-            return {"error": "产品不存在"}
+        if product and product.company_id and not company_id:
+            company_id = product.company_id
 
-        # ===== 知识库合并：公司级 + 产品级 MD 文档 =====
-        from backend.services.kb_parser import parse_knowledge_base
+    if company_id:
+        result = await db.execute(select(Company).where(Company.id == company_id))
+        company = result.scalar_one_or_none()
 
-        # 收集所有知识库 raw Markdown
-        kb_parts = []
+    # 2. 按模式合并知识库 Markdown
+    kb_parts = []
 
-        # 1) 产品级 KnowledgeBaseDoc
-        prod_docs = (await db.execute(
-            select(KnowledgeBaseDoc).where(KnowledgeBaseDoc.product_id == product_id)
-        )).scalars().all()
-        for doc in prod_docs:
-            if doc.content:
-                kb_parts.append(f"## {doc.title}\n{doc.content}")
-
-        # 3) 公司级 KnowledgeBaseDoc
-        if product.company_id:
-            company_docs = (await db.execute(
-                select(KnowledgeBaseDoc).where(KnowledgeBaseDoc.company_id == product.company_id)
+    if content_mode == "product":
+        # ── 纯产品模式：只取产品知识库 ──
+        if product_id:
+            prod_docs = (await db.execute(
+                select(KnowledgeBaseDoc).where(KnowledgeBaseDoc.product_id == product_id)
             )).scalars().all()
-            for doc in company_docs:
+            for doc in prod_docs:
                 if doc.content:
-                    kb_parts.append(f"## [公司] {doc.title}\n{doc.content}")
+                    kb_parts.append(f"## {doc.title}\n{doc.content}")
 
-        # 合并为统一的 raw Markdown
-        merged_raw = "\n\n".join(kb_parts)
-        kb_structured = parse_knowledge_base(merged_raw, product.category or "")
-        logger.info(f"[KB] 合并知识库: "
-                    f"产品文档={len(prod_docs)}, 公司文档={len(company_docs) if product.company_id else 0}, "
-                    f"合并后={len(merged_raw)}字")
+            # 也附加公司级知识库（作为行业背景）
+            if product and product.company_id:
+                comp_docs = (await db.execute(
+                    select(KnowledgeBaseDoc).where(KnowledgeBaseDoc.company_id == product.company_id)
+                )).scalars().all()
+                for doc in comp_docs:
+                    if doc.content:
+                        kb_parts.append(f"## [公司背景] {doc.title}\n{doc.content}")
 
-        # 品牌调性关键词：优先用 tone_config，fallback 品类关键词
-        tone = product.tone_config.get("style", "") if product.tone_config else ""
-        if not tone:
-            cat = product.category or ""
-            tone_map = {
-                "渔业设备": "专业可靠、科技赋能养殖、降本增效",
-                "农业设备": "精准种植、智慧农业、省时省力",
-            }
-            tone = tone_map.get(cat, "")
+        logger.info(f"[KB:product] product_id={product_id}, 共 {len(kb_parts)} 个文档片段")
 
-        product_info = {
-            "name": product.name,
-            "category": product.category or "",
-            "price": kb_structured.get("price", ""),
-            "key_ingredients": kb_structured.get("key_ingredients", ""),
-            "claims": kb_structured.get("claims", ""),
-            "key_points": kb_structured.get("key_points", ""),
-            "target_audience": kb_structured.get("target_audience", ""),
-            "industry_context": kb_structured.get("industry_context", ""),
-            "tone_keywords": tone,
+    elif content_mode == "company":
+        # ── 纯公司模式：只取公司级知识库 ──
+        if company_id:
+            comp_docs = (await db.execute(
+                select(KnowledgeBaseDoc).where(KnowledgeBaseDoc.company_id == company_id)
+            )).scalars().all()
+            for doc in comp_docs:
+                if doc.content:
+                    kb_parts.append(f"## {doc.title}\n{doc.content}")
+
+        logger.info(f"[KB:company] company_id={company_id}, 共 {len(kb_parts)} 个文档片段")
+
+    elif content_mode == "mixed":
+        # ── 混合模式：公司知识库为主体，产品知识库为补充 ──
+        # 先放公司（优先级高，AI 会更关注前面的内容）
+        if company_id:
+            comp_docs = (await db.execute(
+                select(KnowledgeBaseDoc).where(KnowledgeBaseDoc.company_id == company_id)
+            )).scalars().all()
+            for doc in comp_docs:
+                if doc.content:
+                    kb_parts.append(f"## [公司主体] {doc.title}\n{doc.content}")
+
+        # 再追加产品（辅助信息）
+        if product_id:
+            prod_docs = (await db.execute(
+                select(KnowledgeBaseDoc).where(KnowledgeBaseDoc.product_id == product_id)
+            )).scalars().all()
+            for doc in prod_docs:
+                if doc.content:
+                    kb_parts.append(f"## [产品补充] {doc.title}\n{doc.content}")
+
+        logger.info(f"[KB:mixed] company_id={company_id}, product_id={product_id}, 共 {len(kb_parts)} 个文档片段")
+
+    # 3. 解析结构化字段
+    merged_raw = "\n\n".join(kb_parts)
+    category = ""
+    if product:
+        category = product.category or ""
+    elif company:
+        category = company.industry or ""
+
+    kb_structured = parse_knowledge_base(merged_raw, category)
+
+    # 4. 品牌调性
+    tone = ""
+    if product and product.tone_config:
+        tone = product.tone_config.get("style", "")
+    if not tone and product:
+        cat = product.category or ""
+        tone_map = {
+            "渔业设备": "专业可靠、科技赋能养殖、降本增效",
+            "农业设备": "精准种植、智慧农业、省时省力",
         }
+        tone = tone_map.get(cat, "")
 
-        # 选题调度（未指定则自动推荐）
+    # 5. 确定主体名称和分类
+    if content_mode == "company":
+        main_name = company.name if company else "品牌"
+        main_category = company.industry or category
+    elif content_mode == "mixed":
+        # 公司为主体，产品作为辅助提及
+        main_name = company.name if company else (product.name if product else "品牌")
+        main_category = company.industry or category
+    else:  # product
+        main_name = product.name if product else "产品"
+        main_category = category
+
+    # 6. 构建 product_info（兼容现有 prompt 模板的占位符）
+    product_info = {
+        "name": main_name,
+        "category": main_category,
+        "price": kb_structured.get("price", ""),
+        "key_ingredients": kb_structured.get("key_ingredients", ""),
+        "claims": kb_structured.get("claims", ""),
+        "key_points": kb_structured.get("key_points", ""),
+        "target_audience": kb_structured.get("target_audience", ""),
+        "industry_context": kb_structured.get("industry_context", ""),
+        "tone_keywords": tone,
+        # 额外字段（可在 prompt 模板中引用）
+        "company_name": company.name if company else "",
+        "product_name": product.name if product else "",
+        "content_mode": content_mode,
+    }
+
+    # 7. 混合/公司模式时，在 system_prompt 追加额外指令
+    mode_instruction = ""
+    if content_mode == "company":
+        mode_instruction = (
+            f"\n\n【生成模式：纯公司品牌内容】\n"
+            f"本次内容以「{main_name}」公司/品牌为主体，重点展示品牌形象、行业地位、"
+            f"企业文化、技术实力等，不专注于单一产品推介。"
+        )
+    elif content_mode == "mixed":
+        prod_name = product.name if product else ""
+        mode_instruction = (
+            f"\n\n【生成模式：公司为主 + 产品辅助混合内容】\n"
+            f"本次内容以「{main_name}」品牌为主体（占内容 70%+），"
+            f"自然带出旗下产品「{prod_name}」作为佐证（占 30% 以内）。"
+            f"重心在于展示品牌综合实力，产品信息仅做自然引用，不做重点推销。"
+        )
+
+    return {
+        "product_info": product_info,
+        "mode_instruction": mode_instruction,
+        "product": product,
+        "company": company,
+    }
+
+
+# ==================== 主任务函数（直接调用） ====================
+
+async def generate_content_task(
+    product_id: int = None,
+    company_id: int = None,
+    content_mode: str = "product",
+    platforms: list = None,
+    override_prompt: str = None,
+    topic_category: str = None,
+):
+    """
+    AI 内容生成 — 三模式统一调度
+
+    content_mode:
+      product  → 以产品为主体（须传 product_id）
+      company  → 以公司为主体（须传 company_id）
+      mixed    → 公司为主 + 产品辅助（须传 company_id，product_id 可选）
+    """
+    logger.info(
+        f"[Task] 生成内容: mode={content_mode}, product_id={product_id}, "
+        f"company_id={company_id}, platforms={platforms}, topic={topic_category}"
+    )
+
+    # 参数校验
+    if content_mode == "product" and not product_id:
+        return {"error": "纯产品模式必须传 product_id"}
+    if content_mode in ("company", "mixed") and not company_id:
+        return {"error": f"{content_mode} 模式必须传 company_id"}
+
+    async with AsyncSessionLocal() as db:
+        # ── 构建知识库 & product_info ──
+        ctx = await _build_product_info(db, product_id, company_id, content_mode)
+        product_info = ctx["product_info"]
+        mode_instruction = ctx["mode_instruction"]
+        product = ctx["product"]
+        company = ctx["company"]
+
+        # 注入模式指令到 override_prompt
+        effective_override = override_prompt or ""
+        if mode_instruction:
+            effective_override = (effective_override + mode_instruction).strip() or None
+
+        # ── 选题调度 ──
         from backend.services.topic_planner import topic_planner
-        from backend.topic_config import TOPIC_MAP, PLATFORM_TOPIC_PRIORITY
+        from backend.topic_config import TOPIC_MAP
 
+        # 以产品为调度主体（纯公司模式也允许选题轮询，但用公司ID兜底）
+        rotation_holder = product  # 仅 product 模式有意义
         topic_per_platform = {}
+
+        if platforms is None:
+            platforms = ["xiaohongshu", "zhihu", "weibo", "wechat", "toutiao", "douyin"]
+
         if topic_category and topic_category in TOPIC_MAP:
-            # 手动指定，所有平台统一
             topic_per_platform = {p: topic_category for p in platforms}
         else:
-            # 自动推荐（每个平台独立推荐）
-            rotation = product.topic_rotation or {}
-            for p in platforms:
-                tid, phase, _debug = await topic_planner.suggest(product_id, p, db, rotation)
-                topic_per_platform[p] = tid
-            product.topic_rotation = rotation
+            if rotation_holder:
+                rotation = rotation_holder.topic_rotation or {}
+                for p in platforms:
+                    tid, phase, _debug = await topic_planner.suggest(product_id, p, db, rotation)
+                    topic_per_platform[p] = tid
+                rotation_holder.topic_rotation = rotation
+            else:
+                # 公司模式：无产品，使用固定选题或全量轮询
+                for p in platforms:
+                    topic_per_platform[p] = "industry_trend"  # 公司模式默认行业趋势
 
-        # 注入 topic 指令到 override_prompt
+        # ── 注入 topic 指令 ──
         from backend.services.ai_generator import ai_generator
         topic_prompt_map = {}
         topic_name_map = {}
@@ -130,31 +277,29 @@ async def generate_content_task(product_id: int, platforms: list, override_promp
             if tc:
                 topic_prompt_map[p] = tc.prompt_injection
                 topic_name_map[p] = tc.name
-                # 平台特定指令
                 if p in tc.platform_specific:
                     topic_prompt_map[p] += "\n" + tc.platform_specific[p]
 
+        # ── AI 生成 ──
         results = await ai_generator.generate_for_all_platforms(
-            product_info, platforms, override_prompt, topic_prompt_map, topic_name_map
+            product_info, platforms, effective_override or None, topic_prompt_map, topic_name_map
         )
 
-        # ===== 配图生成（Seedream 5.0）+ 内联插入 =====
+        # ── 配图生成 ──
         from backend.services.image_generator import image_generator
 
         generated_ids = []
         errors = []
+
         for platform, data in results.items():
             if "error" in data:
                 logger.warning(f"[{platform}] 生成失败: {data['error']}")
                 errors.append({"platform": platform, "error": data["error"]})
                 continue
 
-            # 用内联 [IMG:...] 标记的配图描述生图
             image_markers = data.get("image_markers", [])
-            # 也兼容旧格式 image_descriptions
             image_descs = data.get("image_descriptions", [])
             if not image_markers and image_descs:
-                # 旧格式：位置信息缺失，统一插入到正文末尾
                 image_markers = [(len(data.get("body", "").split("\n")), d) for d in image_descs]
 
             image_urls = []
@@ -162,22 +307,18 @@ async def generate_content_task(product_id: int, platforms: list, override_promp
 
             if image_markers and image_generator.is_configured:
                 descs_for_gen = [m[1] for m in image_markers if m[1]]
-                # 增强 prompt：加上产品信息，让配图更贴合上下文
                 enhanced_prompts = [
                     f"{product_info['name']} — {desc}，{product_info.get('category', '')}相关，商业摄影风格，高清"
                     for desc in descs_for_gen
                 ]
-                logger.info(f"[{platform}] 开始生成配图: {len(enhanced_prompts)} 张，prompts={[p[:60] for p in enhanced_prompts]}")
+                logger.info(f"[{platform}] 开始生成配图: {len(enhanced_prompts)} 张")
                 generated_urls = await image_generator.generate_batch(enhanced_prompts, size="2k")
-                # 过滤失败的
                 generated_urls = [u for u in generated_urls if u]
                 logger.info(f"[{platform}] 配图生成完成: {len(generated_urls)}/{len(descs_for_gen)} 张")
 
-                # 将生成的图片 URL 内联插入到正文指定位置
                 body_lines = body.split("\n")
                 url_idx = 0
                 for marker_pos, _marker_desc in sorted(image_markers, key=lambda x: x[0], reverse=True):
-                    # reverse order insert so positions don't shift
                     if url_idx < len(generated_urls) and generated_urls[url_idx]:
                         img_line = f"\n[配图:{generated_urls[url_idx]}]\n"
                         if marker_pos < len(body_lines):
@@ -188,35 +329,32 @@ async def generate_content_task(product_id: int, platforms: list, override_promp
                     url_idx += 1
                 body = "\n".join(body_lines)
             elif image_descs and image_generator.is_configured:
-                # 旧格式回退：图片加到末尾
                 enhanced_descs = [
                     f"{product_info['name']} — {desc}，{product_info.get('category', '')}相关，商业摄影风格"
                     for desc in image_descs
                 ]
-                logger.info(f"[{platform}] 开始生成配图（旧格式）: {len(enhanced_descs)} 张")
                 gen_urls = await image_generator.generate_batch(enhanced_descs, size="2k")
                 image_urls = [u for u in gen_urls if u]
-                logger.info(f"[{platform}] 配图生成完成: {len(image_urls)}/{len(image_descs)} 张")
                 if image_urls:
                     body += "\n\n" + "\n".join(f"[配图:{u}]" for u in image_urls)
-            elif image_descs and not image_markers:
-                # 有描述但没配置图片生成
-                pass
 
             content = Content(
                 product_id=product_id,
+                company_id=company_id or (product.company_id if product else None),
+                content_mode=content_mode,
                 platform=platform,
                 title=data.get("title", ""),
                 body=body,
                 tags=data.get("tags", []),
-                image_paths=image_urls,  # ← 真实生成的图片URL
+                image_paths=image_urls,
                 topic_category=topic_per_platform.get(platform),
                 prompt_version="1.0",
                 generation_params={
                     "raw": data.get("raw_generated", ""),
                     "image_descriptions": image_descs,
                     "image_urls": image_urls,
-                    "image_markers": [(p, d) for p, d in image_markers],  # 可序列化
+                    "image_markers": [(p, d) for p, d in image_markers],
+                    "content_mode": content_mode,
                 },
                 status="draft",
             )
@@ -225,8 +363,14 @@ async def generate_content_task(product_id: int, platforms: list, override_promp
             generated_ids.append(content.id)
 
         await db.commit()
-        logger.info(f"[Task] 生成完成: {len(generated_ids)} 篇, errors={len(errors)}")
-        return {"generated_ids": generated_ids, "platforms": list(results.keys()), "topics": topic_per_platform, "errors": errors}
+        logger.info(f"[Task] 生成完成: mode={content_mode}, {len(generated_ids)} 篇, errors={len(errors)}")
+        return {
+            "generated_ids": generated_ids,
+            "platforms": list(results.keys()),
+            "topics": topic_per_platform,
+            "errors": errors,
+            "content_mode": content_mode,
+        }
 
 
 async def scrape_data_task():

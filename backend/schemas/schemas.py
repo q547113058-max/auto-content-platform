@@ -203,16 +203,24 @@ class ContentUpdate(BaseModel):
 
 class ContentGenerateRequest(BaseModel):
     """AI 内容生成请求"""
-    product_id: int
-    platforms: Optional[List[str]] = None  # 留空则全平台生成
-    override_prompt: Optional[str] = None  # 覆盖提示词
+    product_id: Optional[int] = None                    # 纯公司模式时可为 None
+    company_id: Optional[int] = None                    # 纯公司/混合模式时需传
+    content_mode: str = Field(
+        default="product",
+        description="生成模式: product=纯产品 | company=纯公司 | mixed=公司产品混合（公司为主）"
+    )
+    platforms: Optional[List[str]] = None               # 留空则全平台生成
+    override_prompt: Optional[str] = None               # 覆盖提示词
     topic_category: Optional[str] = Field(None, description="选题分类（留空自动推荐）")
 
 
 class ContentResponse(BaseModel):
     id: int
-    product_id: int
+    product_id: Optional[int] = None
     product_name: Optional[str] = None  # JOIN Product 填充
+    company_id: Optional[int] = None
+    company_name: Optional[str] = None  # JOIN Company 填充
+    content_mode: Optional[str] = "product"
     platform: str
     title: str
     body: str

@@ -102,7 +102,10 @@ class Content(Base):
     __tablename__ = "contents"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)   # 纯公司模式时可为 NULL
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, comment="生成时关联公司（公司/混合模式必填）")
+    content_mode = Column(String(20), default="product",
+                          comment="生成模式: product=纯产品 | company=纯公司 | mixed=公司产品混合")
     platform = Column(String(50), nullable=False, comment="目标平台")
     title = Column(Text, nullable=False)
     body = Column(Text, nullable=False)
@@ -115,6 +118,7 @@ class Content(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # 关联
+    company = relationship("Company", foreign_keys=[company_id], lazy="select")
     product = relationship("Product", back_populates="contents")
     publish_records = relationship("PublishRecord", back_populates="content", lazy="dynamic")
 

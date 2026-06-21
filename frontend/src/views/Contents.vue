@@ -73,10 +73,17 @@
             </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column prop="product_name" label="产品" width="120" show-overflow-tooltip>
+        <el-table-column prop="product_name" label="主体" width="130" show-overflow-tooltip>
           <template #default="{ row }">
-            <span v-if="row.product_name" style="color:var(--brand)">{{ row.product_name }}</span>
-            <span v-else class="text-muted">—</span>
+            <span v-if="row.content_mode === 'company'" style="color:#409eff">
+              🏢 {{ row.company_name || '—' }}
+            </span>
+            <span v-else-if="row.content_mode === 'mixed'" style="color:#67c23a">
+              🔀 {{ row.company_name || row.product_name || '—' }}
+            </span>
+            <span v-else style="color:var(--brand)">
+              {{ row.product_name || '—' }}
+            </span>
           </template>
         </el-table-column>
         <el-table-column prop="platform" label="平台" width="95">
@@ -193,25 +200,80 @@
     </el-dialog>
 
     <!-- AI Generate Dialog -->
-    <el-dialog v-model="genVisible" title="AI 生成内容" width="560px" destroy-on-close>
+    <el-dialog v-model="genVisible" title="AI 生成内容" width="580px" destroy-on-close>
       <el-form :model="genForm" label-width="100px" label-position="left">
-        <el-form-item label="选择产品" required>
-          <el-select v-model="genForm.product_id" style="width:100%" filterable placeholder="选择产品">
-            <el-option v-for="p in products" :key="p.id" :label="p.name" :value="p.id" />
+
+        <!-- 生成模式 -->
+        <el-form-item label="生成模式" required>
+          <el-radio-group v-model="genForm.content_mode" @change="onModeChange">
+            <el-radio-button value="product">
+              <span>📦 纯产品</span>
+            </el-radio-button>
+            <el-radio-button value="company">
+              <span>🏢 纯公司</span>
+            </el-radio-button>
+            <el-radio-button value="mixed">
+              <span>🔀 混合</span>
+            </el-radio-button>
+          </el-radio-group>
+          <div style="margin-top:6px;font-size:12px;color:var(--text-muted)">
+            <span v-if="genForm.content_mode==='product'">以产品为主体，深度推介产品特性与卖点</span>
+            <span v-else-if="genForm.content_mode==='company'">以品牌/公司为主体，展示企业形象与行业地位</span>
+            <span v-else>公司为主（70%）+ 产品辅助引用（30%），品牌背书型内容</span>
+          </div>
+        </el-form-item>
+
+        <!-- 选择公司（公司/混合模式必填） -->
+        <el-form-item
+          v-if="genForm.content_mode === 'company' || genForm.content_mode === 'mixed'"
+          label="选择公司"
+          required
+        >
+          <el-select v-model="genForm.company_id" style="width:100%" filterable placeholder="选择品牌/公司">
+            <el-option v-for="c in companies" :key="c.id" :label="c.name" :value="c.id">
+              <span>{{ c.name }}</span>
+              <span style="color:var(--text-muted);font-size:12px;margin-left:8px">{{ c.industry || '' }}</span>
+            </el-option>
           </el-select>
         </el-form-item>
+
+        <!-- 选择产品（纯产品必填；混合可选） -->
+        <el-form-item
+          :label="genForm.content_mode === 'mixed' ? '关联产品' : '选择产品'"
+          :required="genForm.content_mode === 'product'"
+        >
+          <el-select
+            v-model="genForm.product_id"
+            style="width:100%"
+            filterable
+            :placeholder="genForm.content_mode === 'mixed' ? '可选，不选则仅用公司知识库' : '选择产品'"
+            :clearable="genForm.content_mode !== 'product'"
+          >
+            <el-option v-for="p in filteredProducts" :key="p.id" :label="p.name" :value="p.id" />
+          </el-select>
+        </el-form-item>
+
+        <!-- 目标平台 -->
         <el-form-item label="目标平台">
           <el-select v-model="genForm.platforms" style="width:100%" multiple placeholder="全部平台（不选=全平台）">
             <el-option v-for="p in platforms" :key="p.key" :label="p.label" :value="p.key" />
           </el-select>
         </el-form-item>
+
+        <!-- 选题方向 -->
         <el-form-item label="选题方向">
           <div style="display:flex;gap:8px;width:100%">
             <el-select v-model="genForm.topic_category" style="flex:1" clearable placeholder="自动推荐">
               <el-option v-for="t in topicOptions" :key="t.id" :label="t.name" :value="t.id" />
             </el-select>
             <el-tooltip content="智能推荐选题方向" placement="top">
-              <el-button type="primary" :loading="topicLoading" @click="getSuggestedTopic" size="small">✨ 推荐</el-button>
+              <el-button
+                type="primary"
+                :loading="topicLoading"
+                :disabled="!canSuggestTopic"
+                @click="getSuggestedTopic"
+                size="small"
+              >✨ 推荐</el-button>
             </el-tooltip>
           </div>
         </el-form-item>
@@ -241,6 +303,7 @@ import { onMounted, reactive, ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import * as api from '@/api/contents'
 import { getProducts } from '@/api/products'
+import { getCompanies } from '@/api/companies'
 
 // ========== Data & Pagination ==========
 const data = ref([])
@@ -417,15 +480,47 @@ const genVisible = ref(false)
 const genLoading = ref(false)
 const topicLoading = ref(false)
 const products = ref([])
-const genForm = reactive({ product_id: null, platforms: [], topic_category: '' })
+const companies = ref([])
+const genForm = reactive({
+  content_mode: 'product',
+  product_id: null,
+  company_id: null,
+  platforms: [],
+  topic_category: ''
+})
 const suggestedTopic = reactive({ category: '', name: '', subtitle: '' })
+
+// 当选择公司时，过滤该公司旗下的产品
+const filteredProducts = computed(() => {
+  if (genForm.content_mode === 'product') return products.value
+  if (genForm.company_id) {
+    const filtered = products.value.filter(p => p.company_id === genForm.company_id)
+    return filtered.length ? filtered : products.value
+  }
+  return products.value
+})
+
+// 推荐选题需要有产品 ID
+const canSuggestTopic = computed(() => {
+  if (genForm.content_mode === 'company') return false // 纯公司无产品选题
+  return !!genForm.product_id
+})
+
+function onModeChange() {
+  genForm.product_id = null
+  genForm.company_id = null
+  suggestedTopic.category = ''
+}
 
 async function openGenDialog() {
   try {
-    const res = await getProducts()
-    products.value = res.items || res || []
-  } catch { products.value = [] }
+    const [pRes, cRes] = await Promise.all([getProducts(), getCompanies()])
+    products.value = pRes.items || pRes || []
+    companies.value = Array.isArray(cRes) ? cRes : (cRes.items || [])
+  } catch { products.value = []; companies.value = [] }
+  genForm.content_mode = 'product'
   genForm.product_id = null
+  genForm.company_id = null
   genForm.platforms = []
   genForm.topic_category = ''
   suggestedTopic.category = ''
@@ -451,14 +546,21 @@ async function getSuggestedTopic() {
 }
 
 async function doGenerate() {
-  if (!genForm.product_id) return ElMessage.warning('请选择产品')
+  const mode = genForm.content_mode
+  if (mode === 'product' && !genForm.product_id) return ElMessage.warning('请选择产品')
+  if ((mode === 'company' || mode === 'mixed') && !genForm.company_id) return ElMessage.warning('请选择公司')
+
   genLoading.value = true
   try {
-    const res = await api.generateContent({
-      product_id: genForm.product_id,
+    const payload = {
+      content_mode: mode,
       platforms: genForm.platforms.length ? genForm.platforms : undefined,
-      topic_category: genForm.topic_category || undefined
-    })
+      topic_category: genForm.topic_category || undefined,
+    }
+    if (genForm.product_id) payload.product_id = genForm.product_id
+    if (genForm.company_id) payload.company_id = genForm.company_id
+
+    const res = await api.generateContent(payload)
     const d = res.data || res
     const ids = d.generated_ids || []
     const errors = d.errors || []
@@ -474,11 +576,9 @@ async function doGenerate() {
       ElMessage.warning(errMsg)
     }
   } catch (e) {
-    // 超时或网络错误已在拦截器中提示，此处静默处理
     if (e?.code === 'ECONNABORTED') {
       ElMessage.warning('AI 生成耗时较长，仍在后端处理中，请刷新列表查看结果')
     }
-    // 其他错误已由拦截器 ElMessage.error 处理
   } finally {
     genLoading.value = false
   }
