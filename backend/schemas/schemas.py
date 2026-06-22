@@ -212,6 +212,7 @@ class ContentGenerateRequest(BaseModel):
     platforms: Optional[List[str]] = None               # 留空则全平台生成
     override_prompt: Optional[str] = None               # 覆盖提示词
     topic_category: Optional[str] = Field(None, description="选题分类（留空自动推荐）")
+    auto_publish: bool = Field(False, description="生成完成后自动发布（需先配置平台账号）")
 
 
 class ContentResponse(BaseModel):

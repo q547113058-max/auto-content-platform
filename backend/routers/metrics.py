@@ -225,15 +225,15 @@ async def get_top_contents(
         "likes": "cm.likes DESC",
         "comments": "cm.comments DESC",
         "shares": "cm.shares DESC",
-        "engagement": "(cm.likes + cm.comments + cm.shares + cm.collects) * 1.0 / NULLIF(cm.views, 0) DESC",
+        "engagement": "CASE WHEN cm.views > 0 THEN (cm.likes + cm.comments + cm.shares + cm.collects) * 1.0 / cm.views ELSE 0 END DESC",
     }
     order_clause = order_map.get(sort_by, "cm.views DESC")
 
     query = text(f"""
         SELECT c.id, c.title, c.platform, pr.publish_time,
                cm.views, cm.likes, cm.comments, cm.shares, cm.collects,
-               CASE WHEN cm.views > 0
-                    THEN ROUND((cm.likes + cm.comments + cm.shares + cm.collects) * 100.0 / cm.views, 2)
+               CASE WHEN COALESCE(cm.views, 0) > 0
+                    THEN ROUND((COALESCE(cm.likes,0) + COALESCE(cm.comments,0) + COALESCE(cm.shares,0) + COALESCE(cm.collects,0)) * 100.0 / cm.views, 2)
                     ELSE 0 END as engagement_rate
         FROM content_metrics cm
         JOIN publish_records pr ON cm.publish_record_id = pr.id

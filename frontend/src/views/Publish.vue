@@ -96,7 +96,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getPublishRecords, submitPublish, retryPublish } from '@/api/publish'
 import { getContents } from '@/api/contents'
@@ -126,13 +126,38 @@ const pubVisible = ref(false)
 const pubLoading = ref(false)
 const pubForm = reactive({ content_id: null, account_id: null, publish_strategy: 'immediate' })
 
-// 内容搜索（远程）+ 初始加载，已发布内容自动过滤
+
+// 当前选中账号对应的平台（用于过滤内容）
+const selectedPlatform = ref('')
+
+// 监听账号变化 → 过滤内容列表 + 清空不匹配的已选内容
+watch(() => pubForm.account_id, (newId) => {
+  if (!newId) {
+    selectedPlatform.value = ''
+    pubForm.content_id = null
+    contentOptions.value = []
+    return
+  }
+  const acct = accountOptions.value.find(a => a.id === newId)
+  if (!acct) return
+  selectedPlatform.value = acct.platform
+  searchContents('')   // 重新加载，只显示该平台内容
+  // 如果已选内容平台不匹配，清空
+  if (pubForm.content_id) {
+    const ok = contentOptions.value.some(c => c.id === pubForm.content_id)
+    if (!ok) pubForm.content_id = null
+  }
+})
+
+// 内容搜索（远程）+ 按平台过滤，已发布内容自动过滤
 const contentOptions = ref([])
 const contentLoading = ref(false)
 async function searchContents(keyword) {
   contentLoading.value = true
   try {
-    const params = keyword ? { keyword, page_size: 20 } : { page_size: 50 }
+    const params = { page_size: 50, status: 'draft' }
+    if (selectedPlatform.value) params.platform = selectedPlatform.value
+    if (keyword) params.keyword = keyword
     const res = await getContents(params)
     contentOptions.value = (res.items || res.data?.items || [])
       .filter(c => c.status !== 'published' && c.status !== 'archived')
@@ -153,6 +178,7 @@ async function loadAccounts() {
       return {
         id: a.id,
         label: `${a.account_name}（${platformLabel(a.platform)}）${expired}`,
+        platform: a.platform,
         disabled: a.status === 'expired',
       }
     })
@@ -162,10 +188,10 @@ async function loadAccounts() {
 function openPublishDialog() {
   pubForm.content_id = null
   pubForm.account_id = null
+  selectedPlatform.value = ''
   pubForm.publish_strategy = 'immediate'
   contentOptions.value = []
-  searchContents('')     // ← 预加载最新 50 条内容
-  loadAccounts()         // ← 加载全部账号
+  loadAccounts()         // ← 先加载账号列表
   pubVisible.value = true
 }
 

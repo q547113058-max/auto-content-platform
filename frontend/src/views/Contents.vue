@@ -289,6 +289,9 @@
             <div style="font-size:12px;color:var(--text-muted)">{{ suggestedTopic.subtitle }}</div>
           </template>
         </el-alert>
+        <el-form-item label="选项">
+          <el-checkbox v-model="genForm.auto_publish">生成后自动发布（需先配置平台账号）</el-checkbox>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="genVisible = false">取消</el-button>
@@ -454,9 +457,12 @@ const platforms = [
 const platformMap = Object.fromEntries(platforms.map(p => [p.key, p.label]))
 function platformLabel(k) { return platformMap[k] || k }
 
-const statusMap = { draft: '草稿', generated: '已生成', published: '已发布' }
+const statusMap = { draft: '草稿', generating: '生成中', generated: '已生成', published: '已发布' }
 function statusLabel(s) { return statusMap[s] || s }
-function statusType(s) { return s === 'published' ? 'success' : s === 'generated' ? 'warning' : 'info' }
+function statusType(s) {
+  if (s === 'generating') return 'warning'
+  return s === 'published' ? 'success' : s === 'generated' ? 'warning' : 'info'
+}
 
 const topicOptions = [
   { id: 'tech_explanation', name: '技术解析' },
@@ -486,7 +492,8 @@ const genForm = reactive({
   product_id: null,
   company_id: null,
   platforms: [],
-  topic_category: ''
+  topic_category: '',
+  auto_publish: false,
 })
 const suggestedTopic = reactive({ category: '', name: '', subtitle: '' })
 
@@ -556,19 +563,21 @@ async function doGenerate() {
       content_mode: mode,
       platforms: genForm.platforms.length ? genForm.platforms : undefined,
       topic_category: genForm.topic_category || undefined,
+      auto_publish: genForm.auto_publish,
     }
     if (genForm.product_id) payload.product_id = genForm.product_id
     if (genForm.company_id) payload.company_id = genForm.company_id
 
     const res = await api.generateContent(payload)
     const d = res.data || res
-    const ids = d.generated_ids || []
+    const ids = d.content_ids || []
     const errors = d.errors || []
 
     if (ids.length > 0) {
-      ElMessage.success(`已生成 ${ids.length} 篇内容`)
+      ElMessage.success(`已提交生成任务，${ids.length} 篇内容生成中…`)
       genVisible.value = false
       fetchData()
+      startPolling()
     } else {
       const errMsg = errors.length
         ? errors.map(e => `${e.platform}: ${e.error}`).join('; ')
@@ -582,6 +591,23 @@ async function doGenerate() {
   } finally {
     genLoading.value = false
   }
+}
+
+// ── 轮询刷新 ──
+let pollTimer = null
+function startPolling() {
+  stopPolling()
+  pollTimer = setInterval(async () => {
+    await fetchData()
+    const still = data.value.some(item => item.status === 'generating')
+    if (!still) {
+      stopPolling()
+      ElMessage.success('内容生成完成！')
+    }
+  }, 3000)
+}
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
 }
 
 onMounted(() => fetchData())

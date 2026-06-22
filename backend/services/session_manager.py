@@ -115,9 +115,15 @@ PLATFORM_CONFIGS = {
     },
     "zhihu": {
         "login_url": "https://www.zhihu.com/signin",
-        "check_url": "https://www.zhihu.com",
-        "logged_in_indicator": '[class*="AppHeader-profile"], .AppHeader-profile, [class*="user"], .top-nav-profile',
-        "check_exclude_url": ["signin", "login"],
+        "check_url": "https://www.zhihu.com/notifications",
+        "logged_in_indicator": (
+            '[class*="AppHeader-profile"], '          # 顶部用户头像区域
+            '[class*="Notification"], '                # 通知入口（已登录可见）
+            '[class*="avatar"], '                     # 用户头像
+            '.Modal, [class*="signin"], [class*="SignFlow"]'  # 未登录会出现登录弹窗
+        ),
+        "check_exclude_url": ["signin", "login", "SignFlow"],
+        "logged_out_indicator": '[class*="SignFlow"], [class*="signin"]',  # 未登录标志
     },
     "weibo": {
         "login_url": "https://weibo.com/login.php",
@@ -414,6 +420,30 @@ class SessionManager:
                     except Exception:
                         # 3 秒超时正常，试下一个选择器
                         continue
+
+            # 检查是否有"未登录"标志元素（如登录弹窗、登录按钮）
+            logged_out_indicator = config.get("logged_out_indicator")
+            if logged_out_indicator:
+                for sel in logged_out_indicator.split(","):
+                    sel = sel.strip()
+                    if not sel:
+                        continue
+                    try:
+                        element = await page.query_selector(sel)
+                        if element:
+                            logger.warning(f"[{platform}] 检测到未登录标志元素: {sel}")
+                            # 保存截图
+                            try:
+                                screenshot_dir = Path(settings.STORAGE_STATES_DIR).parent / "debug_screenshots"
+                                screenshot_dir.mkdir(parents=True, exist_ok=True)
+                                screenshot_path = screenshot_dir / f"{platform}_logged_out_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                                await page.screenshot(path=str(screenshot_path))
+                                logger.info(f"[{platform}] 未登录标志截图: {screenshot_path}")
+                            except Exception:
+                                pass
+                            return False
+                    except Exception:
+                        pass
 
             # 回退：URL 中没有配置的排除关键字才算通过
             # 注意：必须使用平台配置的 exclude_urls，不能硬编码

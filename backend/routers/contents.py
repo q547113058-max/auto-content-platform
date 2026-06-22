@@ -1,14 +1,42 @@
 """内容管理 API - 含 AI 生成"""
 from typing import List, Optional
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from backend.models.database import get_db
+from loguru import logger
+from backend.models.database import get_db, AsyncSessionLocal
 from backend.models.models import Content, Product, Company
 from backend.schemas.schemas import (
     ContentCreate, ContentUpdate, ContentGenerateRequest,
     ContentResponse, ContentListResponse, ContentBatchRequest, APIResponse,
 )
 from sqlalchemy import select, func
+from pathlib import Path
+import re, datetime
+
+
+# ── 工具函数：把 image_paths 从本地路径/文件名转换成 HTTP URL ──
+def _normalize_image_paths(image_paths: list) -> list:
+    """
+    将 image_paths 字段规范化为 HTTP URL：
+    - 绝对本地路径 → 提取文件名 → /generated_images/<filename>
+    - 已有 URL（http/https）→ 保留
+    - 纯文件名 → /generated_images/<filename>
+    """
+    if not image_paths:
+        return []
+    normalized = []
+    for p in image_paths:
+        if not p:
+            continue
+        if p.startswith("http://") or p.startswith("https://"):
+            normalized.append(p)
+        else:
+            # 提取文件名（兼容 Windows / Linux 路径）
+            filename = p.replace("\\", "/").split("/")[-1]
+            if filename:
+                normalized.append(f"/generated_images/{filename}")
+    return normalized
 
 router = APIRouter()
 
@@ -82,7 +110,7 @@ async def list_contents(
             title=content.title,
             body=content.body,
             tags=content.tags,
-            image_paths=content.image_paths,
+            image_paths=_normalize_image_paths(content.image_paths),
             prompt_version=content.prompt_version,
             topic_category=content.topic_category,
             status=content.status,
@@ -113,16 +141,13 @@ async def generate_content(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    AI 内容生成 — 三模式统一入口
-
-    content_mode:
-      - product : 纯产品文案（须传 product_id）
-      - company : 纯公司品牌内容（须传 company_id）
-      - mixed   : 公司为主 + 产品辅助（须传 company_id，product_id 可选）
+    AI 内容生成 — 异步模式
+    立即返回临时 content_ids，后台继续生成，生成完成后替换内容。
+    auto_publish：生成完成后自动发布（需先配置平台账号）
     """
     mode = request.content_mode or "product"
 
-    # 参数校验
+    # ── 参数校验（同步，快速失败）──
     if mode == "product":
         if not request.product_id:
             raise HTTPException(status_code=400, detail="纯产品模式必须传 product_id")
@@ -137,10 +162,7 @@ async def generate_content(
         if not res.scalar_one_or_none():
             raise HTTPException(status_code=404, detail="公司不存在")
 
-    from backend.tasks.content_tasks import generate_content_task
     from backend.services.ai_generator import ai_generator
-
-    # 前置校验：AI API Key 是否已配置
     if not ai_generator.is_configured:
         raise HTTPException(
             status_code=400,
@@ -153,27 +175,108 @@ async def generate_content(
         "xiaohongshu", "zhihu", "weibo", "wechat", "toutiao", "douyin"
     ]
 
-    task_result = await generate_content_task(
-        product_id=request.product_id,
-        company_id=request.company_id,
-        content_mode=mode,
-        platforms=platforms,
-        override_prompt=request.override_prompt,
-        topic_category=request.topic_category,
+    # ── 预建临时 Content 记录（status=generating）──
+    now = datetime.datetime.now(datetime.timezone.utc)
+    temp_contents = []
+    for platform in platforms:
+        temp = Content(
+            product_id=request.product_id,
+            company_id=request.company_id or None,
+            content_mode=mode,
+            platform=platform,
+            title="生成中…",
+            body="",
+            tags=[],
+            image_paths=[],
+            topic_category=request.topic_category or None,
+            status="generating",
+            created_at=now,
+        )
+        db.add(temp)
+        temp_contents.append((temp, platform))
+    await db.commit()
+
+    # 刷新获取 ID
+    content_ids = []
+    platform_for_id = {}
+    for temp, platform in temp_contents:
+        await db.refresh(temp)
+        content_ids.append(temp.id)
+        platform_for_id[temp.id] = platform
+
+    logger.info(f"[generate] 已创建临时记录 {content_ids}，后台开始生成…")
+
+    # ── 启动后台任务（立即返回）──
+    asyncio.create_task(
+        _run_generation_task(
+            content_ids=content_ids,
+            product_id=request.product_id,
+            company_id=request.company_id,
+            content_mode=mode,
+            platforms=platforms,
+            override_prompt=request.override_prompt,
+            topic_category=request.topic_category,
+            auto_publish=request.auto_publish,
+        )
     )
-
-    if task_result.get("error"):
-        return APIResponse(success=False, message=task_result["error"], data=task_result)
-
-    generated_ids = task_result.get("generated_ids", [])
-    errors = task_result.get("errors", [])
-    mode_label = {"product": "纯产品", "company": "纯公司", "mixed": "混合"}.get(mode, mode)
 
     return APIResponse(
-        success=len(generated_ids) > 0,
-        message=f"[{mode_label}模式] 完成：{len(generated_ids)} 篇内容已生成" + (f"，{len(errors)} 个平台失败" if errors else ""),
-        data={"generated_ids": generated_ids, "platforms": task_result.get("platforms", []), "errors": errors, "content_mode": mode},
+        success=True,
+        message=f"已提交生成任务，{len(content_ids)} 篇内容生成中…",
+        data={
+            "content_ids": content_ids,
+            "platforms": platforms,
+            "auto_publish": request.auto_publish,
+        },
     )
+
+
+# ── 后台任务：真正执行 AI 生成 ──
+async def _run_generation_task(
+    content_ids: list,
+    product_id: int = None,
+    company_id: int = None,
+    content_mode: str = "product",
+    platforms: list = None,
+    override_prompt: str = None,
+    topic_category: str = None,
+    auto_publish: bool = False,
+):
+    """后台异步执行 AI 生成，完成后更新 Content 记录"""
+    from backend.tasks.content_tasks import generate_content_task
+    from backend.models.database import async_session
+
+    try:
+        async with async_session() as db:
+            result = await generate_content_task(
+                db=db,
+                content_ids=content_ids,
+                product_id=product_id,
+                company_id=company_id,
+                content_mode=content_mode,
+                platforms=platforms,
+                override_prompt=override_prompt,
+                topic_category=topic_category,
+                auto_publish=auto_publish,
+            )
+            logger.info(f"[_run_generation_task] 完成：{result}")
+
+    except Exception as e:
+        import traceback
+        logger.error(f"[_run_generation_task] 失败: {e}\n{traceback.format_exc()}")
+        # 把失败的记录状态改为 draft，标题标记失败
+        try:
+            async with async_session() as db:
+                from sqlalchemy import update
+                from backend.models.models import Content
+                await db.execute(
+                    update(Content)
+                    .where(Content.id.in_(content_ids))
+                    .values(status="draft", title=f"生成失败：{str(e)[:100]}")
+                )
+                await db.commit()
+        except Exception:
+            pass
 
 
 @router.get("/{content_id}", response_model=ContentResponse)
@@ -185,7 +288,23 @@ async def get_content(
     content = result.scalar_one_or_none()
     if not content:
         raise HTTPException(status_code=404, detail="内容不存在")
-    return content
+    return ContentResponse(
+        id=content.id,
+        product_id=content.product_id,
+        product_name=None,
+        company_id=content.company_id,
+        company_name=None,
+        content_mode=content.content_mode or "product",
+        platform=content.platform,
+        title=content.title,
+        body=content.body,
+        tags=content.tags,
+        image_paths=_normalize_image_paths(content.image_paths),
+        prompt_version=content.prompt_version,
+        topic_category=content.topic_category,
+        status=content.status,
+        created_at=content.created_at,
+    )
 
 
 @router.put("/{content_id}", response_model=ContentResponse)

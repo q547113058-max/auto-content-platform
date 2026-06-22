@@ -328,20 +328,49 @@ class AIGenerator:
         # 最终清洗：移除行首尾残留的 [xxx:...] 格式（兜底）
         body = re.sub(r'^\s*\[(配图|图片|链接)[：:][^\]]*\]\s*$', '', body, flags=re.MULTILINE)
 
-        # 提取标签
+        # 提取标签（支持 #关键词# 和 #关键词 两种格式）
         for line in lines:
-            if "标签" in line or "#" in line:
-                found_tags = re.findall(r'#([\w\u4e00-\u9fff]+)', line)
-                tags.extend(found_tags)
-                tag_text = line.replace("标签：", "").replace("标签:", "")
-                if "," in tag_text or "，" in tag_text:
-                    for sep in [",", "，"]:
-                        if sep in tag_text:
-                            tags.extend([t.strip() for t in tag_text.split(sep)])
-                            break
+            # 匹配 #任何内容# 格式（微博/抖音标准格式）
+            hash_tags = re.findall(r'#([^#\n]+)#', line)
+            for t in hash_tags:
+                t = t.strip()
+                if t:
+                    tags.append(t)
+            # 如果没有 #xxx# 格式，尝试匹配行末的 #关键词（空格分隔）
+            if not hash_tags and '#' in line:
+                # 匹配 #中文英文数字_ 连续字符（不含空格）
+                found = re.findall(r'#([\w\u4e00-\u9fff]+)', line)
+                tags.extend(found)
 
-        # 去重 & 过滤空标签
-        tags = [t for t in list(set(tags))[:10] if t.strip()]
+        # ── 标签质量过滤（兜底规则，不依赖 AI 遵守 prompt）──
+        def _is_valid_tag(t: str) -> bool:
+            """判断标签是否合法：2-8字常见关键词，不是句子"""
+            if not t or len(t) < 2 or len(t) > 8:
+                return False
+            # 含标点符号 → 不可能是好标签
+            if re.search(r'[，。！？、；：""''（）【】《》]', t):
+                return False
+            # 是完整句子（含助词/连词）→ 过滤
+            if re.search(r'(的|了|是|在|和|与|或|但|而|就|也|都|还|又|很|非常|特别)', t):
+                return False
+            # 以"我""你""他""这""那"开头 → 像句子
+            if re.match(r'^[我你他她它这那谁什么怎么]', t):
+                return False
+            return True
+
+        # 去重、过滤、限制数量
+        seen = set()
+        filtered = []
+        for t in tags:
+            t = t.strip()
+            if not t or t in seen:
+                continue
+            if _is_valid_tag(t):
+                filtered.append(t)
+                seen.add(t)
+            if len(filtered) >= 5:  # 最多5个标签
+                break
+        tags = filtered
 
         return {
             "title": title,

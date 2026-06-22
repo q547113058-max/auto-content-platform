@@ -3,6 +3,8 @@
 Celery 延迟初始化 — 本地无 Redis 时直接调用 async 函数
 """
 import asyncio
+from typing import List, Optional
+
 from loguru import logger
 from backend.config import settings
 from backend.models.database import AsyncSessionLocal
@@ -305,6 +307,11 @@ async def generate_content_task(
     platforms: list = None,
     override_prompt: str = None,
     topic_category: str = None,
+    content_ids: list = None,
+    auto_publish: bool = False,
+    db=None,
+    # ── 以下为内部回调用，前端不直接传 ──
+    _publish_after_gen: bool = False,
 ):
     """
     AI 内容生成 — 三模式统一调度
@@ -333,6 +340,16 @@ async def generate_content_task(
         product = ctx["product"]
         company = ctx["company"]
         ad_decision_meta = ctx.get("ad_decision_meta")  # 混合模式广告密度决策元数据
+
+        # ── 加载预创建记录（异步生成模式）──
+        _existing_by_platform = {}   # {platform: Content}
+        if content_ids:
+            for _cid in content_ids:
+                _res = await db.execute(select(Content).where(Content.id == _cid))
+                _c = _res.scalar_one_or_none()
+                if _c:
+                    _existing_by_platform[_c.platform] = _c
+            logger.info(f"[Task] 加载预创建记录: {list(_existing_by_platform.keys())}")
 
         # 注入模式指令到 override_prompt
         effective_override = override_prompt or ""
@@ -388,7 +405,12 @@ async def generate_content_task(
         generated_ids = []
         errors = []
 
-        for platform, data in results.items():
+        # 按 platforms 顺序迭代（与预创建记录顺序一致）
+        for platform in platforms:
+            data = results.get(platform)
+            if not data:
+                errors.append({"platform": platform, "error": "AI 未返回该平台内容"})
+                continue
             if "error" in data:
                 logger.warning(f"[{platform}] 生成失败: {data['error']}")
                 errors.append({"platform": platform, "error": data["error"]})
@@ -513,31 +535,54 @@ async def generate_content_task(
                                 local_image_paths.append(local)
                                 image_urls.append(url)
 
-            content = Content(
-                product_id=product_id,
-                company_id=company_id or (product.company_id if product else None),
-                content_mode=content_mode,
-                platform=platform,
-                title=data.get("title", ""),
-                body=body_clean,
-                tags=data.get("tags", []),
-                image_paths=local_image_paths if local_image_paths else image_urls,
-                topic_category=topic_per_platform.get(platform),
-                prompt_version="1.0",
-                generation_params={
+            # ── 创建或更新 Content 记录 ──
+            _content = None
+            if platform in _existing_by_platform:
+                # 更新预创建记录（异步生成模式）
+                _content = _existing_by_platform[platform]
+                _content.title = data.get("title", "")
+                _content.body = body_clean
+                _content.tags = data.get("tags", [])
+                _content.image_paths = local_image_paths if local_image_paths else []
+                _content.topic_category = topic_per_platform.get(platform)
+                _content.prompt_version = "1.0"
+                _content.generation_params = {
                     "raw": data.get("raw_generated", ""),
                     "image_descriptions": image_descs,
                     "image_urls": image_urls,
                     "image_markers": [(p, d) for p, d in image_markers],
                     "content_mode": content_mode,
-                    # 混合模式广告密度决策记录（便于审计和调试）
                     "ad_ratio_decision": ad_decision_meta,
-                },
-                status="draft",
-            )
-            db.add(content)
-            await db.flush()
-            generated_ids.append(content.id)
+                }
+                _content.status = "draft"
+                await db.flush()
+                logger.info(f"[{platform}] 预创建记录已更新 ID={_content.id}")
+            else:
+                # 新建记录（向后兼容）
+                _content = Content(
+                    product_id=product_id,
+                    company_id=company_id or (product.company_id if product else None),
+                    content_mode=content_mode,
+                    platform=platform,
+                    title=data.get("title", ""),
+                    body=body_clean,
+                    tags=data.get("tags", []),
+                    image_paths=local_image_paths if local_image_paths else [],
+                    topic_category=topic_per_platform.get(platform),
+                    prompt_version="1.0",
+                    generation_params={
+                        "raw": data.get("raw_generated", ""),
+                        "image_descriptions": image_descs,
+                        "image_urls": image_urls,
+                        "image_markers": [(p, d) for p, d in image_markers],
+                        "content_mode": content_mode,
+                        "ad_ratio_decision": ad_decision_meta,
+                    },
+                    status="draft",
+                )
+                db.add(_content)
+                await db.flush()
+            generated_ids.append(_content.id)
 
         await db.commit()
         logger.info(f"[Task] 生成完成: mode={content_mode}, {len(generated_ids)} 篇, errors={len(errors)}")

@@ -78,6 +78,11 @@ uploads_dir = Path(__file__).resolve().parent.parent / "uploads"
 uploads_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
+# 生成图片目录（AI 生成的配图）
+generated_images_dir = Path(__file__).resolve().parent.parent / "data" / "generated_images"
+generated_images_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/generated_images", StaticFiles(directory=str(generated_images_dir)), name="generated_images")
+
 # ========== 注册路由 ==========
 from backend.routers import products, accounts, contents, publish, metrics, optimizer, prompts, sessions, engagement, db, knowledge, topic, companies, settings as settings_router
 

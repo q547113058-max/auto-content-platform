@@ -7,10 +7,10 @@ const api = axios.create({
   headers: { 'Content-Type': 'application/json' }
 })
 
-// AI 生成长耗时接口（DeepSeek + Seedream 配图，可能超 60s）
+// AI 生成长耗时接口（DeepSeek + Seedream 配图，可能超 5 分钟）
 export const aiApi = axios.create({
   baseURL: '/api/v1',
-  timeout: 300000,  // 5 分钟
+  timeout: 600000,  // 10 分钟（生成 6 个平台 + 配图耗时较长）
   headers: { 'Content-Type': 'application/json' }
 })
 aiApi.interceptors.response.use(
