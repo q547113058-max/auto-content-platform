@@ -463,7 +463,7 @@ class AIGenerator:
         # 1. 优先提取内联 [IMG:description]
         inline = re.findall(r'\[IMG:(.*?)\]', text)
         if inline:
-            return [d.strip()[:200] for d in inline if d.strip()][:10]
+            return [d.strip()[:200] for d in inline if d.strip()][:5]
 
         # 2. 回退：从"配图建议"段落提取
         descriptions = []
