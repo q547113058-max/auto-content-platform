@@ -399,8 +399,46 @@ async def generate_content_task(
             if not image_markers and image_descs:
                 image_markers = [(len(data.get("body", "").split("\n")), d) for d in image_descs]
 
+            import re
+            import httpx
+            import hashlib
+            from pathlib import Path
+            from urllib.parse import urlparse
+
             image_urls = []
+            local_image_paths = []  # 本地下载后的文件路径（供发布器上传）
             body = data.get("body", "")
+
+            # 兜底清理：body 中残留的 [配图:...] / [图片:...] 占位符（AI 幻觉）
+            body = re.sub(r'^\s*\[(配图|图片|链接)[：:][^\]]*\]\s*$', '', body, flags=re.MULTILINE)
+            body = re.sub(r'\n{3,}', '\n\n', body).strip()
+
+            # ── 图片下载辅助函数 ──
+            from backend.config import BASE_DIR as _BASE
+            IMG_CACHE_DIR = Path(_BASE) / "data" / "generated_images"
+            IMG_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+            async def _download_image(url: str) -> Optional[str]:
+                """下载远程图片到本地缓存，返回本地路径"""
+                try:
+                    parsed = urlparse(url)
+                    ext = Path(parsed.path).suffix or ".png"
+                    if ext.lower() not in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                        ext = ".png"
+                    url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+                    local_path = IMG_CACHE_DIR / f"{platform}_{url_hash}{ext}"
+                    if local_path.exists():
+                        logger.info(f"[{platform}] 图片已缓存: {local_path}")
+                        return str(local_path)
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+                        resp = await client.get(url)
+                        resp.raise_for_status()
+                        local_path.write_bytes(resp.content)
+                        logger.info(f"[{platform}] 图片已下载: {local_path} ({len(resp.content)} bytes)")
+                        return str(local_path)
+                except Exception as e:
+                    logger.warning(f"[{platform}] 图片下载失败: {url[:60]}... {e}")
+                    return None
 
             if image_markers and image_generator.is_configured:
                 descs_for_gen = [m[1] for m in image_markers if m[1]]
@@ -413,6 +451,15 @@ async def generate_content_task(
                 generated_urls = [u for u in generated_urls if u]
                 logger.info(f"[{platform}] 配图生成完成: {len(generated_urls)}/{len(descs_for_gen)} 张")
 
+                for url in generated_urls:
+                    local = await _download_image(url)
+                    if local:
+                        local_image_paths.append(local)
+                        image_urls.append(url)
+                    else:
+                        image_urls.append(url)
+
+                # 图片标记插入正文（仅 URL 引用，不用于发布）
                 body_lines = body.split("\n")
                 url_idx = 0
                 for marker_pos, _marker_desc in sorted(image_markers, key=lambda x: x[0], reverse=True):
@@ -422,9 +469,9 @@ async def generate_content_task(
                             body_lines.insert(marker_pos, img_line)
                         else:
                             body_lines.append(img_line)
-                        image_urls.append(generated_urls[url_idx])
                     url_idx += 1
                 body = "\n".join(body_lines)
+
             elif image_descs and image_generator.is_configured:
                 enhanced_descs = [
                     f"{product_info['name']} — {desc}，{product_info.get('category', '')}相关，商业摄影风格"
@@ -432,8 +479,39 @@ async def generate_content_task(
                 ]
                 gen_urls = await image_generator.generate_batch(enhanced_descs, size="2k")
                 image_urls = [u for u in gen_urls if u]
+                for url in image_urls:
+                    local = await _download_image(url)
+                    if local:
+                        local_image_paths.append(local)
                 if image_urls:
                     body += "\n\n" + "\n".join(f"[配图:{u}]" for u in image_urls)
+
+            # body 最终清洗：移除 [配图:url] 标记（这些是给 DB 看的，发布时图片单独上传）
+            body_clean = re.sub(r'^\s*\[配图[：:][^\]]*\]\s*$', '', body, flags=re.MULTILINE)
+            body_clean = re.sub(r'\n{3,}', '\n\n', body_clean).strip()
+
+            # ── 兜底配图：AI 没生成 [IMG:...] 标记时自动推导 ──
+            if not local_image_paths and not image_urls and image_generator.is_configured:
+                title = data.get("title", "")
+                cat = product_info.get("category", "")
+                name = product_info.get("name", "")
+                # 从标题/正文推导 1-2 个配图描述
+                fallback_descs = []
+                if name and cat:
+                    fallback_descs.append(f"professional photo of {name}, {cat} industry, clean background")
+                if title:
+                    fallback_descs.append(f"{title}, high quality commercial photography")
+                if not fallback_descs and body_clean:
+                    fallback_descs.append(body_clean[:80] + "...")
+                if fallback_descs:
+                    logger.info(f"[{platform}] 兜底配图: {fallback_descs}")
+                    gen_urls = await image_generator.generate_batch(fallback_descs[:2], size="2k")
+                    for url in gen_urls:
+                        if url:
+                            local = await _download_image(url)
+                            if local:
+                                local_image_paths.append(local)
+                                image_urls.append(url)
 
             content = Content(
                 product_id=product_id,
@@ -441,9 +519,9 @@ async def generate_content_task(
                 content_mode=content_mode,
                 platform=platform,
                 title=data.get("title", ""),
-                body=body,
+                body=body_clean,
                 tags=data.get("tags", []),
-                image_paths=image_urls,
+                image_paths=local_image_paths if local_image_paths else image_urls,
                 topic_category=topic_per_platform.get(platform),
                 prompt_version="1.0",
                 generation_params={

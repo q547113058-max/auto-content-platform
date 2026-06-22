@@ -26,10 +26,12 @@ export function uploadKnowledgeFile(file) {
   })
 }
 
-// Word/Excel 上传 → 直接生成 MD 知识库文档
-export function uploadKBDoc(file, { companyId = null, productId = null } = {}) {
+// Word/Excel/MD 上传 → 直接生成 MD 知识库文档（支持多文件）
+export function uploadKBDoc(files, { companyId = null, productId = null } = {}) {
   const fd = new FormData()
-  fd.append('file', file)
+  for (const f of files) {
+    fd.append('files', f)
+  }
   const params = {}
   if (companyId) params.company_id = companyId
   if (productId) params.product_id = productId

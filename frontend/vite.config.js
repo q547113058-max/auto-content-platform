@@ -22,14 +22,15 @@ export default defineConfig({
     }
   },
   server: {
+    host: '0.0.0.0',
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://192.168.1.5:8003',
+        target: 'http://192.168.1.5:8005',
         changeOrigin: true
       },
       '/uploads': {
-        target: 'http://192.168.1.5:8003',
+        target: 'http://192.168.1.5:8005',
         changeOrigin: true
       }
     }

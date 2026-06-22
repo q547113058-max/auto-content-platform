@@ -1,4 +1,6 @@
 """发布管理 API — v2: 返回内容标题 + 字段名对齐前端"""
+import sys
+print(f"=== LOADING publish.py: {__file__} ===", file=sys.stderr)
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,10 +66,17 @@ async def publish_content(
     db: AsyncSession = Depends(get_db),
 ):
     """提交发布任务"""
+    import sys
+    print(f"=== PUBLISH_CONTENT CALLED: content_id={request.content_id}, account_id={request.account_id} ===", file=sys.stderr)
+    sys.stderr.flush()
     result = await db.execute(select(Content).where(Content.id == request.content_id))
     content = result.scalar_one_or_none()
     if not content:
         raise HTTPException(status_code=404, detail="内容不存在")
+    if content.status == "published":
+        raise HTTPException(status_code=400, detail="该内容已发布，不允许重复发布")
+    if content.status == "archived":
+        raise HTTPException(status_code=400, detail="该内容已归档，不可发布")
 
     result = await db.execute(
         select(PlatformAccount).where(PlatformAccount.id == request.account_id)
@@ -77,6 +86,14 @@ async def publish_content(
         raise HTTPException(status_code=404, detail="账号不存在")
     if account.status != "active":
         raise HTTPException(status_code=400, detail="账号状态异常，请先检查会话")
+    if account.platform != content.platform:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"PLATFORM MISMATCH: content.platform={content.platform}, account.platform={account.platform}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"平台不匹配：内容平台为 {content.platform}，账号平台为 {account.platform}"
+        )
 
     record = PublishRecord(
         content_id=request.content_id,

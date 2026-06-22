@@ -17,10 +17,16 @@ class AIGenerator:
     """AI 内容生成器 — 单次输入，全平台适配"""
 
     def __init__(self):
-        self.client = self._init_client()
+        self._client: Optional[AsyncOpenAI] = None
         self.prompts_dir = Path(settings.PROMPTS_DIR)
         self._prompts_cache: Dict[str, Dict[str, str]] = {}
         self._formatter = string.Formatter()
+
+    async def _get_client(self) -> AsyncOpenAI:
+        """延迟初始化 AI 客户端（首次调用时才校验 API Key）"""
+        if self._client is None:
+            self._client = self._init_client()
+        return self._client
 
     def _safe_format(self, template_str: str, **kwargs) -> str:
         """安全格式化模板，缺失占位符替换为空字符串"""
@@ -36,25 +42,53 @@ class AIGenerator:
                 result.append(str(val))
         return "".join(result)
 
+    @property
+    def is_configured(self) -> bool:
+        """检查 AI API Key 是否已配置"""
+        provider = settings.AI_PROVIDER
+        if provider == "deepseek":
+            return bool(settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY", ""))
+        elif provider == "qwen":
+            return bool(settings.QWEN_API_KEY or os.getenv("QWEN_API_KEY", ""))
+        elif provider == "openai":
+            return bool(settings.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY", ""))
+        return False
+
+    def _provider_name(self) -> str:
+        """返回当前 AI Provider 名称（用于错误提示）"""
+        return settings.AI_PROVIDER
+
     def _init_client(self) -> AsyncOpenAI:
         """初始化 AI 客户端"""
         provider = settings.AI_PROVIDER
 
         if provider == "deepseek":
-            return AsyncOpenAI(
-                api_key=settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY", ""),
-                base_url=settings.DEEPSEEK_API_BASE,
-            )
+            api_key = settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY", "")
+            if not api_key:
+                raise ValueError(
+                    "DeepSeek API Key 未配置。请在 .env 文件中设置 DEEPSEEK_API_KEY=你的密钥，"
+                    "或设置环境变量 DEEPSEEK_API_KEY。\n"
+                    "获取密钥: https://platform.deepseek.com/api_keys"
+                )
+            return AsyncOpenAI(api_key=api_key, base_url=settings.DEEPSEEK_API_BASE)
         elif provider == "qwen":
-            return AsyncOpenAI(
-                api_key=settings.QWEN_API_KEY or os.getenv("QWEN_API_KEY", ""),
-                base_url=settings.QWEN_API_BASE,
-            )
+            api_key = settings.QWEN_API_KEY or os.getenv("QWEN_API_KEY", "")
+            if not api_key:
+                raise ValueError(
+                    "通义千问 API Key 未配置。请在 .env 文件中设置 QWEN_API_KEY=你的密钥，"
+                    "或设置环境变量 QWEN_API_KEY。\n"
+                    "获取密钥: https://dashscope.console.aliyun.com/apiKey"
+                )
+            return AsyncOpenAI(api_key=api_key, base_url=settings.QWEN_API_BASE)
         elif provider == "openai":
-            return AsyncOpenAI(
-                api_key=settings.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY", ""),
-                base_url=settings.OPENAI_API_BASE,
-            )
+            api_key = settings.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY", "")
+            if not api_key:
+                raise ValueError(
+                    "OpenAI API Key 未配置。请在 .env 文件中设置 OPENAI_API_KEY=你的密钥，"
+                    "或设置环境变量 OPENAI_API_KEY。\n"
+                    "获取密钥: https://platform.openai.com/api-keys"
+                )
+            return AsyncOpenAI(api_key=api_key, base_url=settings.OPENAI_API_BASE)
         else:
             raise ValueError(f"不支持的 AI Provider: {provider}")
 
@@ -113,7 +147,8 @@ class AIGenerator:
 
         # 调用 LLM
         try:
-            response = await self.client.chat.completions.create(
+            client = await self._get_client()
+            response = await client.chat.completions.create(
                 model=settings.AI_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -177,12 +212,16 @@ class AIGenerator:
         return results
 
     def _parse_generated_content(self, text: str, platform: str) -> Dict[str, Any]:
-        """解析 AI 生成的内容（去除 Markdown、标准化标点、提取内联图片标记）"""
+        """解析 AI 生成的内容（去除 Markdown、标准化标点、提取内联图片标记、去重）"""
         # 1. 去除 Markdown 格式标记
         text = self._clean_markdown(text)
 
         # 2. 标准化标点符号
         text = self._normalize_punctuation(text)
+
+        # 3. 清理 AI 幻觉占位符：[配图:xxx] / [配图：xxx] / [图片:xxx] 等
+        text = re.sub(r'\[配图[：:].*?\]', '', text)
+        text = re.sub(r'\[图片[：:].*?\]', '', text)
 
         lines = text.strip().split("\n")
 
@@ -212,23 +251,82 @@ class AIGenerator:
                     title = line.strip()[:30]
                     break
 
-        # 构建正文（提取内联图片标记）
+        # 构建正文（提取内联图片标记，句子级去重）
         body_parts = []
-        for i, line in enumerate(lines[body_start:]):
-            # 提取 [IMG:description] 标记
-            img_pattern = re.compile(r'\[IMG:(.*?)\]')
-            matches = list(img_pattern.finditer(line))
-            if matches:
-                for m in matches:
-                    desc = m.group(1).strip()
-                    if desc:
-                        image_markers.append((len(body_parts), desc))
-                # 移除标记但保留其他内容
-                line = img_pattern.sub('', line).strip()
-            if line:
-                body_parts.append(line)
+        seen_fingerprints = set()  # 句子指纹去重
+
+        # 预编译正则
+        img_pattern = re.compile(r'\[IMG:(.*?)\]')
+        img_with_colon = re.compile(r'\[IMG[：:](.*?)\]')
+        link_pattern = re.compile(r'\[配图[：:].*?\]')
+        pic_pattern = re.compile(r'\[图片[：:].*?\]')
+        tag_pattern = re.compile(r'#[\w\u4e00-\u9fff]+')
+        # 中文句子分割（。！？\n）+ 英文句号后跟空格
+        sent_split = re.compile(r'(?<=[。！？\n])(?=\S)')
+
+        def _clean_for_fingerprint(s: str) -> str:
+            """去掉标签和空格，取前30+后20字做指纹"""
+            c = tag_pattern.sub('', s).strip()
+            c = re.sub(r'\s+', '', c)
+            return (c[:30] + c[-20:]).strip() if len(c) >= 15 else c
+
+        for line in lines[body_start:]:
+            # 提取 [IMG:description] 和 [IMG：description] 标记
+            img_descs = []
+            for m in img_pattern.finditer(line):
+                d = m.group(1).strip()
+                if d:
+                    img_descs.append(d)
+            for m in img_with_colon.finditer(line):
+                d = m.group(1).strip()
+                if d:
+                    img_descs.append(d)
+
+            for desc in img_descs:
+                image_markers.append((len(body_parts), desc))
+
+            # 移除所有标记但保留其他内容
+            line = img_pattern.sub('', line)
+            line = img_with_colon.sub('', line)
+            line = link_pattern.sub('', line)
+            line = pic_pattern.sub('', line)
+            line = line.strip()
+
+            if not line:
+                continue
+
+            # ── 句子级去重：把长行切成句子，逐句比对 ──
+            if len(line) > 40:
+                sub_sentences = sent_split.split(line)
+                deduped_parts = []
+                for sub in sub_sentences:
+                    sub = sub.strip()
+                    if not sub or len(sub) < 4:
+                        if sub:
+                            deduped_parts.append(sub)
+                        continue
+                    fp = _clean_for_fingerprint(sub)
+                    if not fp or fp in seen_fingerprints:
+                        continue
+                    seen_fingerprints.add(fp)
+                    deduped_parts.append(sub)
+                line = ''.join(deduped_parts)
+                if not line.strip():
+                    continue
+            else:
+                # 短行：整行指纹去重
+                fp = _clean_for_fingerprint(line)
+                if fp and fp in seen_fingerprints:
+                    continue
+                if fp:
+                    seen_fingerprints.add(fp)
+
+            body_parts.append(line)
 
         body = "\n".join(body_parts).strip()
+
+        # 最终清洗：移除行首尾残留的 [xxx:...] 格式（兜底）
+        body = re.sub(r'^\s*\[(配图|图片|链接)[：:][^\]]*\]\s*$', '', body, flags=re.MULTILINE)
 
         # 提取标签
         for line in lines:

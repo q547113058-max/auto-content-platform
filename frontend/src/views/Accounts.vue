@@ -18,16 +18,26 @@
           </template>
         </el-table-column>
         <el-table-column prop="account_name" label="账号名称" min-width="140" />
-        <el-table-column prop="session_state_path" label="会话状态" width="140" show-overflow-tooltip />
-        <el-table-column prop="status" label="状态" width="100">
+        <el-table-column label="会话状态" width="120">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.status === 'active' ? 'success' : 'info'">{{ row.status }}</el-tag>
+            <el-tag size="small" :type="sessionTagType(row)">{{ sessionLabel(row) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column prop="status" label="账号状态" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.status === 'active' ? 'success' : row.status === 'expired' ? 'danger' : 'info'">{{ row.status }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="260" fixed="right">
           <template #default="{ row }">
             <el-button text type="primary" size="small" @click="handleOpenEdit(row)">编辑</el-button>
             <el-button text size="small" @click="check(row)">检测</el-button>
+            <el-button
+              v-if="row.login_type === 'cookie' && row.platform !== 'wechat'"
+              text type="success" size="small"
+              :loading="browserLoggingId === row.id"
+              @click="doBrowserLogin(row)"
+            >一键登录</el-button>
             <el-button text type="danger" size="small" @click="remove(row.id)">删除</el-button>
           </template>
         </el-table-column>
@@ -88,6 +98,7 @@
 
               <!-- 小红书 -->
               <div v-if="form.platform === 'xiaohongshu'" class="cookie-guide">
+                <div class="guide-note" style="margin-bottom:12px">💡 <b>推荐</b>：在账号列表点击「一键登录」按钮，系统自动弹出浏览器，登录后全自动保存（含 HttpOnly Cookie）。</div>
                 <div class="guide-step"><b>1.</b> 打开 <a href="https://creator.xiaohongshu.com" target="_blank">creator.xiaohongshu.com</a> 并扫码登录</div>
                 <div class="guide-step"><b>2.</b> 按 <kbd>F12</kbd> 打开开发者工具 → 切换至 <b>Application</b>（应用程序）标签</div>
                 <div class="guide-step"><b>3.</b> 左侧 Storage → <b>Cookies</b> → 点击 <code>creator.xiaohongshu.com</code></div>
@@ -101,6 +112,7 @@
 
               <!-- 知乎 -->
               <div v-if="form.platform === 'zhihu'" class="cookie-guide">
+                <div class="guide-note" style="margin-bottom:12px">💡 <b>推荐</b>：在账号列表点击「一键登录」按钮，系统自动弹出浏览器，登录后全自动保存（含 HttpOnly Cookie）。</div>
                 <div class="guide-step"><b>1.</b> 打开 <a href="https://www.zhihu.com" target="_blank">zhihu.com</a> 并登录</div>
                 <div class="guide-step"><b>2.</b> <kbd>F12</kbd> → <b>Application</b> → Cookies → <code>zhihu.com</code></div>
                 <div class="guide-step"><b>3.</b> Console 中执行脚本自动导出：</div>
@@ -113,6 +125,7 @@
 
               <!-- 微博 -->
               <div v-if="form.platform === 'weibo'" class="cookie-guide">
+                <div class="guide-note" style="margin-bottom:12px">💡 <b>推荐</b>：在账号列表点击「一键登录」按钮，系统自动弹出浏览器，登录后全自动保存（含 HttpOnly Cookie 如 SUB）。</div>
                 <div class="guide-step"><b>1.</b> 打开 <a href="https://weibo.com" target="_blank">weibo.com</a> 并登录</div>
                 <div class="guide-step"><b>2.</b> <kbd>F12</kbd> → <b>Application</b> → Cookies → <code>weibo.com</code></div>
                 <div class="guide-step"><b>3.</b> Console 中执行脚本自动导出：</div>
@@ -137,6 +150,7 @@
 
               <!-- 今日头条 -->
               <div v-if="form.platform === 'toutiao'" class="cookie-guide">
+                <div class="guide-note" style="margin-bottom:12px">💡 <b>推荐</b>：在账号列表点击「一键登录」按钮，系统自动弹出浏览器，登录后全自动保存（含 HttpOnly Cookie）。</div>
                 <div class="guide-step"><b>1.</b> 打开 <a href="https://mp.toutiao.com" target="_blank">mp.toutiao.com</a> 并登录</div>
                 <div class="guide-step"><b>2.</b> <kbd>F12</kbd> → <b>Application</b> → Cookies → <code>mp.toutiao.com</code></div>
                 <div class="guide-step"><b>3.</b> Console 中执行脚本自动导出：</div>
@@ -149,6 +163,7 @@
 
               <!-- 抖音图文 -->
               <div v-if="form.platform === 'douyin'" class="cookie-guide">
+                <div class="guide-note" style="margin-bottom:12px">💡 <b>推荐</b>：在账号列表点击「一键登录」按钮，系统自动弹出浏览器，登录后全自动保存（含 HttpOnly Cookie）。</div>
                 <div class="guide-step"><b>1.</b> 打开 <a href="https://creator.douyin.com" target="_blank">creator.douyin.com</a> 并扫码登录</div>
                 <div class="guide-step"><b>2.</b> <kbd>F12</kbd> → <b>Application</b> → Cookies → <code>creator.douyin.com</code></div>
                 <div class="guide-step"><b>3.</b> Console 中执行脚本自动导出：</div>
@@ -180,7 +195,7 @@ import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   getAccounts, createAccount, updateAccount, deleteAccount,
-  checkSession, importAccountCookie
+  checkSession, importAccountCookie, browserLogin
 } from '@/api/accounts'
 import { useCrud } from '@/composables/useCrud'
 
@@ -235,14 +250,46 @@ async function importCookie() {
       return
     }
     const res = await importAccountCookie(targetId, cookieInput.value, form.value.platform)
-    cookieResult.value = `已导入 ${res.data?.cookie_count || res?.cookie_count || '?'} 条 Cookie`
-    ElMessage.success('Cookie 导入成功，账号状态已设为 active')
+    const d = res.data || res
+    const count = d.cookie_count || res.cookie_count || '?'
+    const verified = d.verified
+    const msg = res.message || res.data?.message || ''
+
+    cookieResult.value = `已导入 ${count} 条 Cookie`
+    if (verified) {
+      ElMessage.success(msg || 'Cookie 导入成功，会话有效')
+    } else {
+      ElMessage.warning(msg || 'Cookie 已导入但会话验证未通过，建议重新获取')
+    }
     cookieInput.value = ''
     crud.fetch()
   } catch (e) {
     // error handled by interceptor
   } finally {
     cookieLoading.value = false
+  }
+}
+
+// ── 一键登录：启动浏览器，用户手动登录后自动抓取 Cookie ──
+const browserLoggingId = ref(null)
+
+async function doBrowserLogin(row) {
+  if (browserLoggingId.value) {
+    ElMessage.warning('已有登录窗口正在进行中')
+    return
+  }
+  browserLoggingId.value = row.id
+  try {
+    ElMessage.info(`正在打开 ${platformLabel(row.platform)} 登录窗口，请在浏览器中完成登录（5 分钟内）...`)
+    const res = await browserLogin(row.id)
+    const msg = res.message || ''
+    ElMessage.success(msg || '登录成功，Cookie 已自动保存')
+    crud.fetch()
+  } catch (e) {
+    const msg = e?.response?.data?.detail || e?.response?.data?.message || e?.message || '登录失败'
+    ElMessage.error(msg)
+  } finally {
+    browserLoggingId.value = null
   }
 }
 
@@ -299,11 +346,47 @@ const platforms = [
 const platformMap = Object.fromEntries(platforms.map(p => [p.key, p.label]))
 function platformLabel(k) { return platformMap[k] || k }
 
+const sessionStatusMap = {
+  active: '有效', expired: '已过期', error: '异常', unknown: '未检测'
+}
+function sessionLabel(row) {
+  if (row.login_type === 'api') return 'API Token'
+  return sessionStatusMap[row.status] || '未检测'
+}
+function sessionTagType(row) {
+  if (row.login_type === 'api') return ''
+  if (row.status === 'active') return 'success'
+  if (row.status === 'expired') return 'danger'
+  if (row.status === 'error') return 'warning'
+  return 'info'
+}
+
 async function check(row) {
   try {
-    await checkSession(row.id)
-    ElMessage.success('会话正常')
-  } catch { /* error handled by interceptor */ }
+    const res = await checkSession(row.id)
+    const d = res.data || res
+    if (d.status === 'active') {
+      ElMessage.success('会话有效')
+    } else if (d.status === 'expired') {
+      ElMessage.warning('会话已过期，需要重新登录')
+    } else if (d.status === 'error') {
+      ElMessage.error(d.message || res.message || '会话检测异常，请稍后重试')
+    } else {
+      ElMessage.info(d.message || res.message || '检测完成')
+    }
+  } catch (e) {
+    // axios HTTP 错误（4xx/5xx）走这里
+    const detail = e?.response?.data?.detail
+    const dataStatus = e?.response?.data?.data?.status
+    if (dataStatus === 'expired') {
+      ElMessage.warning('会话已过期，需要重新登录')
+    } else if (dataStatus === 'error') {
+      ElMessage.error(detail || '检测异常')
+    }
+    // 其他错误由拦截器处理
+  } finally {
+    crud.fetch()
+  }
 }
 
 onMounted(() => crud.fetch())

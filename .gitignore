@@ -19,6 +19,9 @@ logs/
 data/*.db
 data/*.sqlite
 
+# 知识库上传文件（用户数据）
+data/knowledge_base/
+
 # 环境变量
 .env
 .env.local
@@ -51,6 +54,27 @@ Thumbs.db
 *.pem
 *.key
 secrets/
+
+# 浏览器会话状态（含 Cookie，禁止提交）
+storage_states/
+
+# 上传文件
+uploads/
+
+# 调试截图
+debug_screenshots/
+
+# 图片生成缓存
+data/generated_images/
+
+# SQLite WAL 文件
+*.db-shm
+*.db-wal
+
+# 日志文件
+*.log
+backend_err.log
+backend_fmt.log
 
 # 运行脚本（临时）
 resume_publish.py

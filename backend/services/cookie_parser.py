@@ -21,6 +21,15 @@ PLATFORM_DOMAINS = {
     "douyin":       ".douyin.com",
 }
 
+# 平台 → 关键 Cookie 名称（用于导入时诊断：缺失这些 cookie 几乎一定无法通过验证）
+PLATFORM_CRITICAL_COOKIES = {
+    "weibo":        ["SUB"],
+    "xiaohongshu":  ["a1"],
+    "zhihu":        ["d_c0", "z_c0"],
+    "toutiao":      ["ttwid"],
+    "douyin":       ["sessionid"],
+}
+
 
 def _is_netscape_format(lines: list) -> bool:
     """检测是否为 Netscape (tab分隔) 格式，无论有无 # Netscape 头"""
@@ -109,6 +118,18 @@ def _parse_netscape_lines(lines: list, cookies: list):
                 secure=(secure.upper() == "TRUE") if isinstance(secure, str) else secure,
                 http_only=False,
             ))
+
+
+def check_critical_cookies(cookies: list, platform: str) -> List[str]:
+    """
+    检查给定平台的「关键 Cookie」是否都存在。
+    返回缺失的关键 Cookie 名称列表；全都有则返回空列表。
+    """
+    critical = PLATFORM_CRITICAL_COOKIES.get(platform, [])
+    if not critical:
+        return []
+    existing = {c["name"] for c in cookies}
+    return [name for name in critical if name not in existing]
 
 
 def parse_cookie_string(cookie_str: str, platform: str) -> Dict[str, Any]:

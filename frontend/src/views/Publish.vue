@@ -126,7 +126,7 @@ const pubVisible = ref(false)
 const pubLoading = ref(false)
 const pubForm = reactive({ content_id: null, account_id: null, publish_strategy: 'immediate' })
 
-// 内容搜索（远程）+ 初始加载
+// 内容搜索（远程）+ 初始加载，已发布内容自动过滤
 const contentOptions = ref([])
 const contentLoading = ref(false)
 async function searchContents(keyword) {
@@ -134,9 +134,12 @@ async function searchContents(keyword) {
   try {
     const params = keyword ? { keyword, page_size: 20 } : { page_size: 50 }
     const res = await getContents(params)
-    contentOptions.value = (res.items || res.data?.items || []).map(c => ({
-      id: c.id, label: `${c.title} — ${platformLabel(c.platform)} [#${c.id}]`
-    }))
+    contentOptions.value = (res.items || res.data?.items || [])
+      .filter(c => c.status !== 'published' && c.status !== 'archived')
+      .map(c => ({
+        id: c.id, label: `${c.title} — ${platformLabel(c.platform)} [#${c.id}]`,
+        platform: c.platform,
+      }))
   } finally { contentLoading.value = false }
 }
 

@@ -138,6 +138,16 @@ async def generate_content(
             raise HTTPException(status_code=404, detail="公司不存在")
 
     from backend.tasks.content_tasks import generate_content_task
+    from backend.services.ai_generator import ai_generator
+
+    # 前置校验：AI API Key 是否已配置
+    if not ai_generator.is_configured:
+        raise HTTPException(
+            status_code=400,
+            detail="AI 内容生成未配置：缺少 API Key。请在 .env 文件中设置 "
+                   f"DEEPSEEK_API_KEY（当前 Provider: {ai_generator._provider_name()}），"
+                   "然后重启后端服务。"
+        )
 
     platforms = request.platforms or [
         "xiaohongshu", "zhihu", "weibo", "wechat", "toutiao", "douyin"

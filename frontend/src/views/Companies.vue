@@ -39,11 +39,6 @@
         <el-form-item label="公司名称" required>
           <el-input v-model="form.name" placeholder="如：鱼开心智能科技" />
         </el-form-item>
-        <el-form-item label="Slug 标识" required>
-          <el-input v-model="form.slug" placeholder="如：yukaixin（用于文件夹命名）">
-            <template #append>.md目录</template>
-          </el-input>
-        </el-form-item>
         <el-form-item label="行业领域">
           <el-input v-model="form.industry" placeholder="如：智慧渔业、智能硬件" />
         </el-form-item>
@@ -79,12 +74,12 @@
             <el-upload
               :auto-upload="false"
               :show-file-list="false"
-              accept=".docx,.xlsx"
+              accept=".docx,.xlsx,.md"
               :on-change="handleKBUpload"
               :disabled="kbUploading"
             >
               <el-button size="small" :loading="kbUploading" :icon="kbUploading ? '' : undefined">
-                {{ kbUploading ? '解析中...' : '📄 上传 Word / Excel' }}
+                {{ kbUploading ? '解析中...' : '📄 上传文档' }}
               </el-button>
             </el-upload>
             <el-button size="small" @click="scanKB()">📂 扫描文件夹</el-button>
@@ -136,7 +131,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getCompanies, createCompany, updateCompany, deleteCompany } from '@/api/companies'
 import { getKBDocs, getKBDoc, createKBDoc, updateKBDoc, deleteKBDoc, scanKnowledgeBase, uploadKBDoc } from '@/api/knowledge'
@@ -152,6 +147,22 @@ const formLoading = ref(false)
 
 const form = ref({
   name: '', slug: '', industry: '', logo: '', description: ''
+})
+
+// 自动根据名称生成 slug（仅新增模式）
+function slugify(name) {
+  // 简单中英文混合 slug：保留字母数字和中文，其他字符替换为连字符
+  let slug = name.toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-+/g, '-')
+  if (!slug) slug = 'company-' + Date.now().toString(36)
+  return slug
+}
+watch(() => form.value.name, (val) => {
+  if (!isEdit.value && val) {
+    form.value.slug = slugify(val)
+  }
 })
 
 const kbDocs = ref([])
@@ -190,8 +201,8 @@ async function loadKBDocs(companyId) {
 }
 
 async function submit() {
-  if (!form.value.name || !form.value.slug) {
-    ElMessage.warning('请填写公司名称和 Slug')
+  if (!form.value.name) {
+    ElMessage.warning('请填写公司名称')
     return
   }
   formLoading.value = true
@@ -297,13 +308,13 @@ async function scanKB() {
 
 async function handleKBUpload(file) {
   const name = (file.name || '').toLowerCase()
-  if (!name.endsWith('.docx') && !name.endsWith('.xlsx')) {
-    ElMessage.warning('请选择 .docx 或 .xlsx 格式的文件')
+  if (!name.endsWith('.docx') && !name.endsWith('.xlsx') && !name.endsWith('.md')) {
+    ElMessage.warning('请选择 .docx、.xlsx 或 .md 格式的文件')
     return
   }
   kbUploading.value = true
   try {
-    const res = await uploadKBDoc(file.raw, { companyId: editId.value })
+    const res = await uploadKBDoc([file.raw], { companyId: editId.value })
     ElMessage.success(`已上传并生成知识库文档：${res.title}`)
     await loadKBDocs(editId.value)
   } catch (e) {

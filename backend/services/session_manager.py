@@ -5,6 +5,13 @@ L2: Playwright StorageState 持久化 (全平台)
 L3: 自动登录 / 人工干预
 """
 from __future__ import annotations
+
+# Windows: Playwright 子进程需要 ProactorEventLoop，必须在所有异步导入前设置
+import sys as _sys
+if _sys.platform == "win32":
+    import asyncio as _asyncio
+    _asyncio.set_event_loop_policy(_asyncio.WindowsProactorEventLoopPolicy())
+
 import os
 import json
 import time
@@ -115,7 +122,19 @@ PLATFORM_CONFIGS = {
     "weibo": {
         "login_url": "https://weibo.com/login.php",
         "check_url": "https://weibo.com",
-        "logged_in_indicator": '[title*="我的主页"]',
+        "logged_in_indicator": (
+            # 新版微博 UI 登录标识
+            '.woo-box-flex, '
+            # 旧版微博导航栏
+            '.gn_nav, [class*="gn_header"], '
+            # 通用：顶部导航/个人中心入口
+            '[class*="Frame_wrap"], '
+            # 用户头像/昵称区域（任何能识别已登录的元素）
+            '.head_pic, [class*="avatar"], '
+            # 右侧个人信息面板
+            '[class*="Profile"], [class*="person"]'
+        ),
+        "check_exclude_url": ["login", "signin", "register", "passport"],
     },
     "wechat": {
         "login_type": "api",  # 使用 API Token，不走 Playwright
@@ -145,11 +164,45 @@ class SessionManager:
 
     @property
     async def browser(self) -> Browser:
-        """懒加载浏览器实例（兼容 Windows ProactorEventLoop）"""
-        if self._browser is None or not self._browser.is_connected():
+        """懒加载浏览器实例（兼容 Windows ProactorEventLoop）
+        
+        当检测到 _browser 断开连接时，同时复位 _pw，
+        避免残留的 Playwright 实例在当前 event loop 中不可用导致异常。
+        """
+        try:
+            connected = self._browser is not None and self._browser.is_connected()
+        except Exception:
+            connected = False
+            logger.warning("[SessionManager] is_connected() 异常，强制重建")
+
+        if not connected:
             if not PLAYWRIGHT_AVAILABLE:
                 raise RuntimeError("Playwright not installed")
             import sys, asyncio
+
+            # 彻底清理旧实例
+            if self._browser is not None:
+                try:
+                    await self._browser.close()
+                except Exception:
+                    pass
+                self._browser = None
+
+            if self._pw is not None:
+                try:
+                    await self._pw.stop()
+                except Exception:
+                    pass
+                self._pw = None
+
+            # 清理所有已失效的上下文缓存
+            for key in list(self._contexts.keys()):
+                try:
+                    await self._contexts[key].close()
+                except Exception:
+                    pass
+            self._contexts.clear()
+
             # Windows: 确保当前 loop 是 ProactorEventLoop，Playwright subprocess 需要
             if sys.platform == "win32":
                 loop = asyncio.get_event_loop()
@@ -159,9 +212,8 @@ class SessionManager:
                     new_loop = asyncio.ProactorEventLoop()
                     asyncio.set_event_loop(new_loop)
                     logger.info("[SessionManager] 已切换到 ProactorEventLoop")
-            # 使用 async with 语法兼容 Windows uvicorn ProactorEventLoop
-            if self._pw is None:
-                self._pw = await async_playwright().start()
+
+            self._pw = await async_playwright().start()
             launch_options = {
                 "headless": settings.PLAYWRIGHT_HEADLESS,
                 "args": [
@@ -176,7 +228,7 @@ class SessionManager:
                 ],
             }
             self._browser = await self._pw.chromium.launch(**launch_options)
-            logger.info("Browser launched")
+            logger.info("[SessionManager] Browser 重新启动成功")
         return self._browser
 
     async def get_context(
@@ -191,30 +243,63 @@ class SessionManager:
         """
         context_key = f"{platform}:{account_id}"
 
+        # 检查缓存上下文是否仍然有效
         if context_key in self._contexts and not force_refresh:
             context = self._contexts[context_key]
             try:
-                await context.pages[0].goto("about:blank")
+                pages = context.pages
+                if pages:
+                    await pages[0].goto("about:blank")
+                else:
+                    # 上下文没有打开的页面，创建一个临时页面检查
+                    page = await context.new_page()
+                    await page.close()
                 return context
             except Exception:
-                pass
+                logger.warning(f"[{platform}:{account_id}] 缓存上下文失效，清理")
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+                del self._contexts[context_key]
 
         state_path = self.storage_dir / platform / f"{account_id}.json"
 
-        if state_path.exists() and not force_refresh:
-            storage_state = json.loads(state_path.read_text(encoding="utf-8"))
+        # force_refresh 只跳过缓存（上面已处理），不跳过 state file 加载
+        if state_path.exists():
+            try:
+                storage_state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, IOError) as e:
+                logger.error(f"[{platform}:{account_id}] StorageState 文件损坏: {e}")
+                return None
+
             if self._check_cookies_valid(storage_state):
-                context = await self._create_context_with_state(storage_state)
-                if await self._verify_logged_in(context, platform):
+                try:
+                    context = await self._create_context_with_state(storage_state)
+                except Exception as e:
+                    logger.error(f"[{platform}:{account_id}] 创建浏览器上下文失败: {e}")
+                    return None
+
+                try:
+                    logged_in = await self._verify_logged_in(context, platform)
+                except Exception as e:
+                    logger.error(f"[{platform}:{account_id}] 登录验证过程异常: {e}")
+                    logged_in = False
+
+                if logged_in:
                     self._contexts[context_key] = context
                     logger.info(f"[{platform}:{account_id}] 会话有效，StorageState 复用")
                     return context
                 else:
                     logger.warning(f"[{platform}:{account_id}] StorageState 过期，需重新登录")
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
             else:
                 logger.warning(f"[{platform}:{account_id}] Cookie 已过期")
         else:
-            logger.info(f"[{platform}:{account_id}] 无 StorageState，需首次登录")
+            logger.info(f"[{platform}:{account_id}] 无 StorageState 文件，需首次登录")
 
         return None
 
@@ -279,44 +364,84 @@ class SessionManager:
         if not check_url:
             return True
 
+        page = None
         try:
             page = await context.new_page()
-            await page.goto(check_url, wait_until="domcontentloaded", timeout=20000)
+            logger.info(f"[{platform}] 开始验证登录状态，访问: {check_url}")
+
+            # 使用 networkidle 确保 SPA 页面完全渲染（微博、知乎等需要）
+            try:
+                await page.goto(check_url, wait_until="networkidle", timeout=25000)
+            except Exception:
+                # networkidle 超时降级为 domcontentloaded + 延长等待
+                logger.info(f"[{platform}] networkidle 超时，降级为 domcontentloaded")
+                await page.goto(check_url, wait_until="domcontentloaded", timeout=20000)
+
+            # 等待 SPA 渲染完成（5 秒，微博/知乎等重型页面需要）
+            await page.wait_for_timeout(5000)
+
+            # 如果是未登录状态，SPA 可能还会做一次客户端跳转，再等 2 秒
+            await page.wait_for_timeout(2000)
+
+            url = page.url
+            logger.info(f"[{platform}] 页面实际 URL: {url}")
 
             # 先检查是否跳转到登录页（最可靠的判断）
-            url = page.url
             for kw in exclude_urls:
                 if kw.lower() in url.lower():
-                    logger.info(f"[{platform}] 页面跳转至登录页: {url}")
-                    await page.close()
+                    logger.warning(f"[{platform}] URL 包含排除关键字「{kw}」，判定为未登录: {url}")
+                    # 保存失败截图供排查
+                    try:
+                        screenshot_dir = Path(settings.STORAGE_STATES_DIR).parent / "debug_screenshots"
+                        screenshot_dir.mkdir(parents=True, exist_ok=True)
+                        screenshot_path = screenshot_dir / f"{platform}_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                        await page.screenshot(path=str(screenshot_path))
+                        logger.info(f"[{platform}] 验证失败截图已保存: {screenshot_path}")
+                    except Exception:
+                        pass
                     return False
 
-            # 再尝试 CSS 选择器
+            # 再尝试 CSS 选择器（使用 wait_for_selector 提高容错）
             if indicator:
-                # 支持逗号分隔的多个选择器
                 selectors = [s.strip() for s in indicator.split(",") if s.strip()]
                 for sel in selectors:
                     try:
-                        element = await page.query_selector(sel)
+                        # 用 wait_for_selector 容忍 SPA 异步渲染延迟
+                        element = await page.wait_for_selector(sel, state="attached", timeout=3000)
                         if element:
-                            logger.info(f"[{platform}] 登录验证通过 (匹配: {sel})")
-                            await page.close()
+                            logger.info(f"[{platform}] 登录验证通过 (CSS 匹配: {sel})")
                             return True
                     except Exception:
+                        # 3 秒超时正常，试下一个选择器
                         continue
 
-            # 回退：URL 中没有 login/signin 也算通过
+            # 回退：URL 中没有配置的排除关键字才算通过
+            # 注意：必须使用平台配置的 exclude_urls，不能硬编码
             is_logged_in = all(
-                kw not in url.lower() for kw in ["login", "signin", "register"]
+                kw not in url.lower() for kw in (exclude_urls or ["login", "signin", "register"])
             )
             if is_logged_in:
-                logger.info(f"[{platform}] 登录验证通过 (URL检查: {url})")
-
-            await page.close()
+                logger.info(f"[{platform}] 登录验证通过 (URL 回退检查: {url}）")
+            else:
+                logger.warning(f"[{platform}] 登录验证未通过 (URL={url}, 排除关键={exclude_urls})")
+                try:
+                    screenshot_dir = Path(settings.STORAGE_STATES_DIR).parent / "debug_screenshots"
+                    screenshot_dir.mkdir(parents=True, exist_ok=True)
+                    screenshot_path = screenshot_dir / f"{platform}_fallback_fail_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                    await page.screenshot(path=str(screenshot_path))
+                    logger.info(f"[{platform}] 回退失败截图: {screenshot_path}")
+                except Exception:
+                    pass
             return is_logged_in
         except Exception as e:
-            logger.error(f"[{platform}] 登录验证失败: {e}")
+            logger.error(f"[{platform}] 登录验证异常: {e}")
             return False
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
 
     async def save_session(
         self, context: BrowserContext, platform: str, account_id: str
@@ -344,6 +469,45 @@ class SessionManager:
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
         logger.info(f"[{platform}:{account_id}] StorageState 已保存")
+
+    async def create_login_browser(self, platform: str):
+        """
+        一键登录：启动一个可见的 Chromium 浏览器，打开平台登录页。
+        返回 (playwright_instance, browser, context, page) 四元组，
+        调用方负责轮询登录状态，并在完成后关闭 browser + playwright。
+        """
+        if not PLAYWRIGHT_AVAILABLE:
+            raise RuntimeError("Playwright not installed")
+
+        config = PLATFORM_CONFIGS.get(platform, {})
+        login_url = config.get("login_url", "")
+        if not login_url:
+            raise ValueError(f"平台 {platform} 未配置 login_url")
+
+        # 确保共享的 playwright 实例已启动（复用 SessionManager 的 browser 属性逻辑）
+        await self.browser  # 触发 _pw 和 _browser 初始化（headless）
+
+        # 额外启动一个可见的浏览器用于用户登录
+        login_browser = await self._pw.chromium.launch(
+            headless=False,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+            ],
+        )
+        context = await login_browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+        )
+        await context.add_init_script(STEALTH_JS)
+        page = await context.new_page()
+        await page.goto(login_url, wait_until="networkidle", timeout=30000)
+        logger.info(f"[{platform}] 一键登录：浏览器已打开 {login_url}，等待用户完成登录...")
+
+        return self._pw, login_browser, context, page
 
     async def get_login_page(self, platform: str) -> BrowserContext:
         """

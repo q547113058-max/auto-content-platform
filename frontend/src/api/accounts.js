@@ -24,3 +24,6 @@ export function importAccountCookie(id, cookieString, platform) {
     platform
   })
 }
+export function browserLogin(id) {
+  return api.post(`/accounts/${id}/browser-login`)
+}

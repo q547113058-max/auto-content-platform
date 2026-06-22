@@ -13,16 +13,10 @@ const routes = [
         meta: { title: '仪表盘', icon: 'Odometer' }
       },
       {
-        path: 'products',
-        name: 'Products',
-        component: () => import('@/views/Products.vue'),
-        meta: { title: '产品管理', icon: 'Goods' }
-      },
-      {
-        path: 'companies',
-        name: 'Companies',
-        component: () => import('@/views/Companies.vue'),
-        meta: { title: '公司管理', icon: 'OfficeBuilding' }
+        path: 'resources',
+        name: 'ResourceHub',
+        component: () => import('@/views/ResourceHub.vue'),
+        meta: { title: '资源管理', icon: 'FolderOpened' }
       },
       {
         path: 'accounts',
@@ -31,16 +25,10 @@ const routes = [
         meta: { title: '账号管理', icon: 'Avatar' }
       },
       {
-        path: 'contents',
-        name: 'Contents',
-        component: () => import('@/views/Contents.vue'),
-        meta: { title: '内容管理', icon: 'Document' }
-      },
-      {
-        path: 'publish',
-        name: 'Publish',
-        component: () => import('@/views/Publish.vue'),
-        meta: { title: '发布管理', icon: 'Promotion' }
+        path: 'content-publish',
+        name: 'ContentHub',
+        component: () => import('@/views/ContentHub.vue'),
+        meta: { title: '内容发布', icon: 'Document' }
       },
       {
         path: 'metrics',

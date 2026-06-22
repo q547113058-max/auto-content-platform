@@ -25,7 +25,7 @@ router = APIRouter()
 KB_ROOT = Path(__file__).resolve().parent.parent.parent / "data" / "knowledge_base"
 
 # ---------- 允许的文件扩展名 ----------
-ALLOWED_EXTENSIONS = {".docx", ".xlsx"}
+ALLOWED_EXTENSIONS = {".docx", ".xlsx", ".md"}
 
 
 # ═══════════════════════════════════════════
@@ -496,78 +496,108 @@ def _xlsx_to_markdown(file_bytes: bytes) -> str:
     return "\n".join(lines)
 
 
-@router.post("/upload-doc", response_model=KBDocResponse)
+@router.post("/upload-doc", response_model=APIResponse)
 async def upload_as_kb_doc(
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(..., description="支持同时上传多个 .md / .docx / .xlsx 文件"),
     company_id: Optional[int] = Query(None, description="关联公司 ID"),
     product_id: Optional[int] = Query(None, description="关联产品 ID"),
     db: AsyncSession = Depends(get_db),
 ):
-    """上传 Word/Excel 文件，自动转为 Markdown 知识库文档"""
+    """上传 Word/Excel/MD 文件，自动转为 Markdown 知识库文档（支持多文件）"""
     # 校验
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="未提供文件名")
     if not company_id and not product_id:
         raise HTTPException(status_code=400, detail="必须指定 company_id 或 product_id")
 
-    ext_lower = file.filename.lower()
-    ext = ext_lower[ext_lower.rfind("."):] if "." in ext_lower else ""
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"仅支持 {', '.join(ALLOWED_EXTENSIONS)} 格式的文件")
+    results = []
+    errors = []
 
-    content = await file.read()
-    if len(content) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="文件大小不能超过 10MB")
+    for file in files:
+        if not file.filename:
+            errors.append({"file": "未知文件", "error": "未提供文件名"})
+            continue
 
-    # 转为 Markdown
-    try:
-        if ext == ".docx":
-            md_content = _docx_to_markdown(content)
-        else:
-            md_content = _xlsx_to_markdown(content)
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"文件解析失败: {str(e)}")
+        ext_lower = file.filename.lower()
+        ext = ext_lower[ext_lower.rfind("."):] if "." in ext_lower else ""
+        if ext not in ALLOWED_EXTENSIONS:
+            errors.append({"file": file.filename, "error": f"不支持的文件格式：{ext}"})
+            continue
 
-    if not md_content.strip():
-        raise HTTPException(status_code=422, detail="文档内容为空，无法生成知识库")
+        try:
+            content = await file.read()
+        except Exception as e:
+            errors.append({"file": file.filename, "error": f"读取文件失败：{str(e)}"})
+            continue
 
-    # 标题：用文件名（去掉扩展名）
-    title = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
+        if len(content) > 10 * 1024 * 1024:
+            errors.append({"file": file.filename, "error": "文件大小不能超过 10MB"})
+            continue
 
-    # 保存到磁盘 + 创建记录
-    file_path = _save_md_file(title, md_content, company_id, product_id)
+        # 转为 Markdown
+        md_content = ""
+        try:
+            if ext == ".docx":
+                md_content = _docx_to_markdown(content)
+            elif ext == ".xlsx":
+                md_content = _xlsx_to_markdown(content)
+            else:
+                # .md 文件：直接读取文本内容
+                try:
+                    md_content = content.decode("utf-8")
+                except UnicodeDecodeError:
+                    md_content = content.decode("gbk")
+        except Exception as e:
+            errors.append({"file": file.filename, "error": f"文件解析失败：{str(e)}"})
+            continue
 
-    doc = KnowledgeBaseDoc(
-        title=title,
-        content=md_content,
-        company_id=company_id,
-        product_id=product_id,
-        category="product",
-        source="uploaded",
-        file_path=file_path,
-        word_count=len(md_content),
-    )
-    db.add(doc)
+        if not md_content.strip():
+            errors.append({"file": file.filename, "error": "文档内容为空，无法生成知识库"})
+            continue
+
+        # 标题：用文件名（去掉扩展名）
+        title = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
+
+        # 保存到磁盘 + 创建记录
+        try:
+            file_path = _save_md_file(title, md_content, company_id, product_id)
+
+            doc = KnowledgeBaseDoc(
+                title=title,
+                content=md_content,
+                company_id=company_id,
+                product_id=product_id,
+                category="product",
+                source="uploaded",
+                file_path=file_path,
+                word_count=len(md_content),
+            )
+            db.add(doc)
+            await db.flush()
+
+            cname = None
+            pname = None
+            if company_id:
+                c = await db.scalar(select(Company.name).where(Company.id == company_id))
+                cname = c
+            if product_id:
+                p = await db.scalar(select(Product.name).where(Product.id == product_id))
+                pname = p
+
+            results.append({
+                "id": doc.id,
+                "title": doc.title,
+                "file": file.filename,
+                "company_name": cname,
+                "product_name": pname,
+            })
+        except Exception as e:
+            errors.append({"file": file.filename, "error": f"保存失败：{str(e)}"})
+            continue
+
     await db.commit()
-    await db.refresh(doc)
-
-    cname = None
-    pname = None
-    if doc.company_id:
-        c = await db.scalar(select(Company.name).where(Company.id == doc.company_id))
-        cname = c
-    if doc.product_id:
-        p = await db.scalar(select(Product.name).where(Product.id == doc.product_id))
-        pname = p
-
-    return KBDocResponse(
-        id=doc.id, title=doc.title,
-        company_id=doc.company_id, company_name=cname,
-        product_id=doc.product_id, product_name=pname,
-        file_path=doc.file_path, category=doc.category,
-        source=doc.source, word_count=doc.word_count,
-        content=doc.content,
-        created_at=doc.created_at, updated_at=doc.updated_at,
+    return APIResponse(
+        success=True,
+        message=f"上传完成：成功 {len(results)} 个，失败 {len(errors)} 个",
+        data={"results": results, "errors": errors},
     )
 
 

@@ -24,25 +24,17 @@
             <el-icon><Odometer /></el-icon>
             <span>功能列表</span>
           </el-menu-item>
-          <el-menu-item index="/products">
-            <el-icon><Goods /></el-icon>
-            <span>产品管理</span>
-          </el-menu-item>
-          <el-menu-item index="/companies">
-            <el-icon><OfficeBuilding /></el-icon>
-            <span>公司管理</span>
+          <el-menu-item index="/resources">
+            <el-icon><FolderOpened /></el-icon>
+            <span>资源管理</span>
           </el-menu-item>
           <el-menu-item index="/accounts">
             <el-icon><Avatar /></el-icon>
             <span>账号管理</span>
           </el-menu-item>
-          <el-menu-item index="/contents">
+          <el-menu-item index="/content-publish">
             <el-icon><Document /></el-icon>
-            <span>内容管理</span>
-          </el-menu-item>
-          <el-menu-item index="/publish">
-            <el-icon><Promotion /></el-icon>
-            <span>发布管理</span>
+            <span>内容发布</span>
           </el-menu-item>
           <el-menu-item index="/metrics">
             <el-icon><DataAnalysis /></el-icon>

@@ -24,7 +24,7 @@
           <template #header>
             <div class="card-header">
               <span class="mono">最近内容</span>
-              <el-button text type="primary" @click="router.push('/contents')">查看全部</el-button>
+              <el-button text type="primary" @click="router.push('/content-publish')">查看全部</el-button>
             </div>
           </template>
           <el-table :data="recentContents" style="width:100%" size="small" v-loading="store.loading">

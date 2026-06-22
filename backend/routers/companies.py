@@ -1,4 +1,5 @@
 """公司/品牌管理 API"""
+import re, time
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +11,17 @@ from backend.schemas.schemas import (
 )
 
 router = APIRouter()
+
+
+def _generate_slug(name: str) -> str:
+    """从公司名称自动生成 slug（保留中文，替换特殊字符为连字符）"""
+    slug = name.lower()
+    slug = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", slug)
+    slug = re.sub(r"^-+|-+$", "", slug)
+    slug = re.sub(r"-+", "-", slug)
+    if not slug:
+        slug = f"company-{int(time.time())}"
+    return slug
 
 
 @router.get("", response_model=List[CompanyResponse])
@@ -47,12 +59,18 @@ async def create_company(
     db: AsyncSession = Depends(get_db),
 ):
     """创建公司/品牌"""
-    # 检查 slug 唯一性
-    existing = await db.scalar(select(Company).where(Company.slug == data.slug))
-    if existing:
-        raise HTTPException(status_code=409, detail=f"slug '{data.slug}' 已被使用")
+    # 自动生成 slug
+    slug = data.slug or _generate_slug(data.name)
 
-    company = Company(**data.model_dump())
+    # 检查 slug 唯一性
+    existing = await db.scalar(select(Company).where(Company.slug == slug))
+    if existing:
+        # 冲突时加时间戳后缀
+        slug = f"{slug}-{int(time.time()) % 10000}"
+
+    company_data = data.model_dump()
+    company_data["slug"] = slug
+    company = Company(**company_data)
     db.add(company)
     await db.commit()
     await db.refresh(company)
@@ -102,11 +120,15 @@ async def update_company(
 
     dump = data.model_dump(exclude_unset=True)
 
+    # 若名称变更但未提供新 slug，自动重新生成
+    if "name" in dump and "slug" not in dump:
+        dump["slug"] = _generate_slug(dump["name"])
+
     # 检查 slug 唯一性
     if "slug" in dump and dump["slug"] != company.slug:
         existing = await db.scalar(select(Company).where(Company.slug == dump["slug"]))
         if existing:
-            raise HTTPException(status_code=409, detail=f"slug '{dump['slug']}' 已被使用")
+            dump["slug"] = f"{dump['slug']}-{int(time.time()) % 10000}"
 
     for key, value in dump.items():
         setattr(company, key, value)

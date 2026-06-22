@@ -144,12 +144,12 @@
             <el-upload
               :auto-upload="false"
               :show-file-list="false"
-              accept=".docx,.xlsx"
+              accept=".docx,.xlsx,.md"
               :on-change="handleKBUpload"
               :disabled="kbUploading"
             >
               <el-button size="small" :loading="kbUploading">
-                {{ kbUploading ? '解析中...' : '📄 上传 Word / Excel' }}
+                {{ kbUploading ? '解析中...' : '📄 上传文档' }}
               </el-button>
             </el-upload>
           </div>
@@ -365,13 +365,13 @@ async function deleteDoc(docId) {
 
 async function handleKBUpload(file) {
   const name = (file.name || '').toLowerCase()
-  if (!name.endsWith('.docx') && !name.endsWith('.xlsx')) {
-    ElMessage.warning('请选择 .docx 或 .xlsx 格式的文件')
+  if (!name.endsWith('.docx') && !name.endsWith('.xlsx') && !name.endsWith('.md')) {
+    ElMessage.warning('请选择 .docx、.xlsx 或 .md 格式的文件')
     return
   }
   kbUploading.value = true
   try {
-    const res = await uploadKBDoc(file.raw, { productId: crud.editId.value })
+    const res = await uploadKBDoc([file.raw], { productId: crud.editId.value })
     ElMessage.success(`已上传并生成知识库文档：${res.title}`)
     await loadKBDocs(crud.editId.value)
   } catch (e) {

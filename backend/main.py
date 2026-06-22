@@ -79,7 +79,7 @@ uploads_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
 # ========== 注册路由 ==========
-from backend.routers import products, accounts, contents, publish, metrics, optimizer, prompts, sessions, engagement, db, knowledge, topic, companies
+from backend.routers import products, accounts, contents, publish, metrics, optimizer, prompts, sessions, engagement, db, knowledge, topic, companies, settings as settings_router
 
 app.include_router(products.router, prefix=f"{settings.API_PREFIX}/products", tags=["产品管理"])
 app.include_router(accounts.router, prefix=f"{settings.API_PREFIX}/accounts", tags=["账号管理"])
@@ -94,6 +94,7 @@ app.include_router(db.router, prefix=f"{settings.API_PREFIX}/db", tags=["数据�
 app.include_router(knowledge.router, prefix=f"{settings.API_PREFIX}/knowledge", tags=["知识库"])
 app.include_router(companies.router, prefix=f"{settings.API_PREFIX}/companies", tags=["公司管理"])
 app.include_router(topic.router, prefix=f"{settings.API_PREFIX}/topics", tags=["选题策划"])
+app.include_router(settings_router.router, prefix=f"{settings.API_PREFIX}/settings", tags=["系统设置"])
 
 
 if __name__ == "__main__":

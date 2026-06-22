@@ -44,7 +44,7 @@ class ProductResponse(BaseModel):
 # ==================== 公司/品牌 ====================
 class CompanyCreate(BaseModel):
     name: str = Field(..., max_length=200)
-    slug: str = Field(..., max_length=100, description="URL 友好标识，如 'yukaixin'")
+    slug: Optional[str] = Field(None, max_length=100, description="自动从 name 生成，无需手动填写")
     description: Optional[str] = None
     industry: Optional[str] = Field(None, max_length=100)
     logo: Optional[str] = Field(None, max_length=500)
