@@ -298,6 +298,65 @@
         <el-button type="primary" :loading="genLoading" @click="doGenerate">开始生成</el-button>
       </template>
     </el-dialog>
+
+    <!-- 自动发布：账号选择对话框 -->
+    <el-dialog v-model="autoPubVisible" title="选择发布账号" width="650px" destroy-on-close>
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom:16px"
+      >
+        <template #title>以下内容已生成完成，请为每个平台选择发布账号</template>
+        <template #default>
+          <span style="font-size:12px;color:var(--text-muted)">
+            将按所选账号依次提交发布任务。如某平台暂无可用账号，请先在「账号管理」中添加。
+          </span>
+        </template>
+      </el-alert>
+
+      <el-table :data="autoPubContents" size="small" style="width:100%">
+        <el-table-column label="平台" width="110">
+          <template #default="{ row }">
+            <el-tag size="small">{{ row.platformLabel }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="内容标题" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.title }}</template>
+        </el-table-column>
+        <el-table-column label="发布账号" width="240">
+          <template #default="{ row }">
+            <el-select
+              :model-value="autoPubAccountMap[row.id]"
+              @update:model-value="val => autoPubAccountMap[row.id] = val"
+              placeholder="选择账号"
+              style="width:100%"
+              size="small"
+            >
+              <el-option
+                v-for="a in getAccountsForPlatform(row.platform)"
+                :key="a.id"
+                :label="a.label"
+                :value="a.id"
+                :disabled="a.disabled"
+              />
+              <template #empty>
+                <span style="font-size:12px;color:var(--el-text-color-placeholder)">
+                  暂无 {{ row.platformLabel }} 可用账号
+                </span>
+              </template>
+            </el-select>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <template #footer>
+        <el-button @click="skipAutoPublish">跳过发布</el-button>
+        <el-button type="primary" :loading="autoPubLoading" :disabled="!canAutoPublish()" @click="doBatchPublish">
+          确认发布 ({{ autoPubContents.length }} 篇)
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -307,6 +366,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import * as api from '@/api/contents'
 import { getProducts } from '@/api/products'
 import { getCompanies } from '@/api/companies'
+import { getAccounts } from '@/api/accounts'
+import { submitPublish } from '@/api/publish'
 
 // ========== Data & Pagination ==========
 const data = ref([])
@@ -495,7 +556,19 @@ const genForm = reactive({
   topic_category: '',
   auto_publish: false,
 })
+
+// 记录最近一次生成任务的信息
+const generatedContentIds = ref([])
+const autoPublishRequested = ref(false)
 const suggestedTopic = reactive({ category: '', name: '', subtitle: '' })
+
+// ── 自动发布：生成完成后选择账号 ──
+const autoPubVisible = ref(false)
+const autoPubLoading = ref(false)
+const autoPubContents = ref([])          // [{ id, title, platform, ... }]
+const autoPubAccountMap = reactive({})   // { contentId: accountId }
+const autoPubAccounts = ref([])          // [{ id, label, platform, disabled }]
+const autoPubAccountsByPlatform = ref({})// { platform: [{ id, label, ... }] }
 
 // 当选择公司时，过滤该公司旗下的产品
 const filteredProducts = computed(() => {
@@ -575,6 +648,8 @@ async function doGenerate() {
 
     if (ids.length > 0) {
       ElMessage.success(`已提交生成任务，${ids.length} 篇内容生成中…`)
+      generatedContentIds.value = ids
+      autoPublishRequested.value = genForm.auto_publish
       genVisible.value = false
       fetchData()
       startPolling()
@@ -603,11 +678,131 @@ function startPolling() {
     if (!still) {
       stopPolling()
       ElMessage.success('内容生成完成！')
+      // 如果勾选了"自动发布"，弹出账号选择对话框
+      if (autoPublishRequested.value && generatedContentIds.value.length > 0) {
+        setTimeout(() => openAutoPublishDialog(), 500)
+      }
     }
   }, 3000)
 }
 function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+}
+
+// ── 自动发布：账号选择 ──
+async function openAutoPublishDialog() {
+  // 1. 从当前列表中找出刚刚生成的内容
+  const ids = generatedContentIds.value
+  const found = data.value.filter(item => ids.includes(item.id) && item.status !== 'generating')
+  if (found.length === 0) {
+    // 可能不在当前页，直接 fetchById
+    autoPubContents.value = []
+    ElMessage.warning('未找到已生成的内容，请手动刷新后发布')
+    return
+  }
+
+  autoPubContents.value = found.map(item => ({
+    id: item.id,
+    title: item.title || '（标题为空）',
+    platform: item.platform,
+    platformLabel: platformLabel(item.platform),
+  }))
+
+  // 2. 加载账号列表
+  await loadAutoPubAccounts()
+
+  // 3. 清空之前的映射
+  for (const key of Object.keys(autoPubAccountMap)) {
+    delete autoPubAccountMap[key]
+  }
+  // 自动预选：为每个平台匹配第一个 active 账号
+  for (const content of autoPubContents.value) {
+    const accts = autoPubAccountsByPlatform.value[content.platform] || []
+    const activeAcct = accts.find(a => !a.disabled)
+    if (activeAcct) {
+      autoPubAccountMap[content.id] = activeAcct.id
+    }
+  }
+
+  autoPubVisible.value = true
+}
+
+async function loadAutoPubAccounts() {
+  try {
+    const res = await getAccounts()
+    const raw = Array.isArray(res) ? res : (res.items || res.data || [])
+    const byPlatform = {}
+    const all = raw.map(a => {
+      const expired = a.status === 'expired'
+      const item = {
+        id: a.id,
+        label: `${a.account_name || a.platform}（${platformLabel(a.platform)}）${expired ? ' [已过期]' : ''}`,
+        platform: a.platform,
+        disabled: expired,
+      }
+      if (!byPlatform[a.platform]) byPlatform[a.platform] = []
+      byPlatform[a.platform].push(item)
+      return item
+    })
+    autoPubAccounts.value = all
+    autoPubAccountsByPlatform.value = byPlatform
+  } catch {
+    autoPubAccounts.value = []
+    autoPubAccountsByPlatform.value = {}
+  }
+}
+
+function getAccountsForPlatform(platform) {
+  return autoPubAccountsByPlatform.value[platform] || []
+}
+
+function canAutoPublish() {
+  // 需要每个内容都选了账号
+  return autoPubContents.value.every(c => autoPubAccountMap[c.id])
+}
+
+async function doBatchPublish() {
+  if (!canAutoPublish()) return ElMessage.warning('请为每个内容选择发布账号')
+
+  autoPubLoading.value = true
+  let success = 0
+  let fail = 0
+  const errors = []
+
+  for (const content of autoPubContents.value) {
+    const accountId = autoPubAccountMap[content.id]
+    if (!accountId) continue
+    try {
+      await submitPublish({
+        content_id: content.id,
+        account_id: accountId,
+        publish_strategy: 'immediate',
+      })
+      success++
+    } catch (e) {
+      fail++
+      errors.push(`${content.platformLabel}: ${e?.response?.data?.detail || e.message}`)
+    }
+  }
+
+  autoPubLoading.value = false
+  autoPubVisible.value = false
+  autoPublishRequested.value = false
+  generatedContentIds.value = []
+
+  if (fail === 0) {
+    ElMessage.success(`已提交 ${success} 篇内容发布任务`)
+  } else {
+    ElMessage.warning(`发布结果：${success} 成功，${fail} 失败。${errors.join('; ')}`)
+  }
+  fetchData()
+}
+
+function skipAutoPublish() {
+  autoPubVisible.value = false
+  autoPublishRequested.value = false
+  generatedContentIds.value = []
+  ElMessage.info('已跳过发布，可稍后在发布管理中手动发布')
 }
 
 onMounted(() => fetchData())
