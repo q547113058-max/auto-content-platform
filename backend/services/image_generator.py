@@ -1,6 +1,7 @@
 """
-豆包 Seedream 5.0 Lite 图片生成服务
-火山引擎方舟平台 API: POST /api/v3/images/generations
+Agnes-Image-2.0-Flash 图片生成服务
+API: POST https://apihub.agnes-ai.com/v1/images/generations
+返回格式: {"data": [{"url": "https://..."}]}
 """
 import httpx
 from typing import List, Optional
@@ -9,19 +10,11 @@ from backend.config import settings
 
 
 class ImageGenerator:
-    """Seedream 5.0 图片生成"""
-
-    # 支持的尺寸（Seedream API 要求小写: 2k/3k/4k 或 WIDTHxHEIGHT）
-    SIZE_OPTIONS = {
-        "1k": "1472x1472",  # ≈1K 判等
-        "2k": "2k",
-        "3k": "3k",
-        "4k": "4k",
-    }
+    """Agnes 图片生成 (images/generations 接口)"""
 
     def __init__(self):
         self.api_key = settings.IMAGE_GEN_API_KEY
-        self.api_base = settings.IMAGE_GEN_API_BASE
+        self.api_base = settings.IMAGE_GEN_API_BASE.rstrip("/")
         self.model = settings.IMAGE_GEN_MODEL
         self._client: Optional[httpx.AsyncClient] = None
 
@@ -37,16 +30,16 @@ class ImageGenerator:
     async def generate(
         self,
         prompt: str,
-        size: str = "2k",
+        size: str = "1024x1024",
         negative_prompt: Optional[str] = None,
     ) -> Optional[str]:
         """
         生成单张图片
 
         Args:
-            prompt: 图片描述词
-            size: 1K / 2K / 4K
-            negative_prompt: 反向提示词
+            prompt: 图片描述词（英文效果更佳）
+            size: 图片尺寸（如 "1024x1024"，可选）
+            negative_prompt: 反向提示词（追加在 prompt 后，以 avoid: 形式）
 
         Returns:
             图片 URL，失败返回 None
@@ -55,20 +48,16 @@ class ImageGenerator:
             logger.warning("IMAGE_GEN_API_KEY 未配置，跳过图片生成")
             return None
 
-        url = f"{self.api_base}/images/generations"
+        # 构建完整 prompt
+        full_prompt = prompt.strip()
+        if negative_prompt:
+            full_prompt += f", avoid: {negative_prompt.strip()}"
 
+        url = f"{self.api_base}/images/generations"
         payload = {
             "model": self.model,
-            "prompt": prompt,
-            "sequential_image_generation": "disabled",
-            "response_format": "url",
-            "size": size,
-            "stream": False,
-            "watermark": True,
+            "prompt": full_prompt,
         }
-        if negative_prompt:
-            payload["negative_prompt"] = negative_prompt
-
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
@@ -83,25 +72,25 @@ class ImageGenerator:
             # 解析返回的图片 URL
             image_url = self._extract_url(data)
             if image_url:
-                logger.info(f"[Seedream] 图片生成成功: {image_url[:60]}...")
+                logger.info(f"[Agnes] 图片生成成功: {image_url[:80]}...")
             else:
-                logger.warning(f"[Seedream] 返回数据中无图片URL: {data}")
+                logger.warning(f"[Agnes] 返回数据中未找到图片URL: {data}")
             return image_url
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"[Seedream] HTTP {e.response.status_code}: {e.response.text[:300]}")
+            logger.error(f"[Agnes] HTTP {e.response.status_code}: {e.response.text[:300]}")
             return None
         except Exception as e:
-            logger.error(f"[Seedream] 生成异常: {e}")
+            logger.error(f"[Agnes] 生成异常: {e}")
             return None
 
     async def generate_batch(
         self,
         prompts: List[str],
-        size: str = "2k",
+        size: str = "1024x1024",
     ) -> List[Optional[str]]:
         """
-        批量生成图片（带2秒间隔避免并发限流）
+        批量生成图片（带 2 秒间隔避免并发限流）
 
         Returns:
             URL 列表，生成失败的项为 None
@@ -114,7 +103,7 @@ class ImageGenerator:
                 urls.append(None)
                 continue
 
-            logger.info(f"[Seedream] 生成第 {i+1}/{len(prompts)} 张: {prompt[:50]}...")
+            logger.info(f"[Agnes] 生成第 {i+1}/{len(prompts)} 张: {prompt[:50]}...")
             url = await self.generate(prompt, size)
             urls.append(url)
 
@@ -125,15 +114,28 @@ class ImageGenerator:
         return urls
 
     def _extract_url(self, data: dict) -> Optional[str]:
-        """从 Seedream 响应中提取图片 URL"""
-        # 标准返回格式: {"data": [{"url": "https://..."}]}
-        if "data" in data and isinstance(data["data"], list) and len(data["data"]) > 0:
-            item = data["data"][0]
+        """
+        从 Agnes images/generations 响应中提取图片 URL
+
+        Agnes 返回格式：
+        {
+          "created": 1782265562,
+          "data": [{"url": "https://platform-outputs.agnes-ai.space/images/..."}]
+        }
+        """
+        try:
+            items = data.get("data", [])
+            if not items:
+                return None
+            item = items[0]
             if isinstance(item, dict):
-                return item.get("url")
+                return item.get("url") or item.get("b64_json")
             elif isinstance(item, str):
                 return item
-        return None
+            return None
+        except Exception as e:
+            logger.error(f"[Agnes] 解析响应失败: {e}, data={data}")
+            return None
 
     async def close(self):
         if self._client:

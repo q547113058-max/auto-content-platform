@@ -85,10 +85,10 @@ class Settings(BaseSettings):
     AI_MAX_TOKENS: int = 4096
 
     # --- AI 图片生成 ---
-    IMAGE_GEN_PROVIDER: str = "seedream"  # seedream / tongyi-wanxiang
+    IMAGE_GEN_PROVIDER: str = "agnes"  # agnes / seedream / tongyi-wanxiang
     IMAGE_GEN_API_KEY: Optional[str] = None
-    IMAGE_GEN_API_BASE: str = "https://ark.cn-beijing.volces.com/api/v3"
-    IMAGE_GEN_MODEL: str = "doubao-seedream-5-0-260128"  # Seedream 5.0 Lite
+    IMAGE_GEN_API_BASE: str = "https://apihub.agnes-ai.com/v1"
+    IMAGE_GEN_MODEL: str = "agnes-image-2.0-flash"  # Agnes 图片模型
 
     # --- 代理 IP ---
     PROXY_ENABLED: bool = False
