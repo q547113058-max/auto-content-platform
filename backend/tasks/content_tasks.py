@@ -464,8 +464,15 @@ async def generate_content_task(
 
             if image_markers and image_generator.is_configured:
                 descs_for_gen = [m[1] for m in image_markers if m[1]]
+                # 真实摄影风格，避免 AI 塑料感
+                _product = product_info.get('name', '')
+                _IMG_STYLE = (
+                    "lifestyle editorial photography, natural window light, soft shadows, "
+                    "shallow depth of field, realistic texture, shot on 35mm lens, "
+                    "candid composition, warm tone, unposed, authentic details"
+                )
                 enhanced_prompts = [
-                    f"{product_info['name']} — {desc}，{product_info.get('category', '')}相关，商业摄影风格，高清"
+                    f"{desc}, featuring {_product}, {_IMG_STYLE}"
                     for desc in descs_for_gen
                 ]
                 logger.info(f"[{platform}] 开始生成配图: {len(enhanced_prompts)} 张")
@@ -495,8 +502,14 @@ async def generate_content_task(
                 body = "\n".join(body_lines)
 
             elif image_descs and image_generator.is_configured:
+                _product = product_info.get('name', '')
+                _IMG_STYLE = (
+                    "lifestyle editorial photography, natural window light, soft shadows, "
+                    "shallow depth of field, realistic texture, shot on 35mm lens, "
+                    "candid composition, warm tone, unposed, authentic details"
+                )
                 enhanced_descs = [
-                    f"{product_info['name']} — {desc}，{product_info.get('category', '')}相关，商业摄影风格"
+                    f"{desc}, featuring {_product}, {_IMG_STYLE}"
                     for desc in image_descs
                 ]
                 gen_urls = await image_generator.generate_batch(enhanced_descs, size="2k")
@@ -519,10 +532,18 @@ async def generate_content_task(
                 name = product_info.get("name", "")
                 # 从标题/正文推导 1-2 个配图描述
                 fallback_descs = []
+                _FALLBACK_STYLE = (
+                    "natural lifestyle photography, soft window light, warm tone, "
+                    "realistic texture, editorial quality, unposed, authentic scene"
+                )
                 if name and cat:
-                    fallback_descs.append(f"professional photo of {name}, {cat} industry, clean background")
+                    fallback_descs.append(
+                        f"natural lifestyle shot of {name} in {cat} setting, {_FALLBACK_STYLE}"
+                    )
                 if title:
-                    fallback_descs.append(f"{title}, high quality commercial photography")
+                    fallback_descs.append(
+                        f"lifestyle editorial photo: {title}, {_FALLBACK_STYLE}"
+                    )
                 if not fallback_descs and body_clean:
                     fallback_descs.append(body_clean[:80] + "...")
                 if fallback_descs:

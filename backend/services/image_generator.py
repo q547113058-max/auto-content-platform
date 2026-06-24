@@ -1,5 +1,5 @@
 """
-Agnes-Image-2.0-Flash 图片生成服务
+Agnes-Image-2.1-Flash 图片生成服务
 API: POST https://apihub.agnes-ai.com/v1/images/generations
 返回格式: {"data": [{"url": "https://..."}]}
 """
