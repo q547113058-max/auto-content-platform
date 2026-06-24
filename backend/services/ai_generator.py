@@ -231,24 +231,34 @@ class AIGenerator:
         image_markers = []  # [(position_index, description), ...]
 
         # 尝试解析标题（通常在第一行）
+        # 注意：需要区分 #主题标签# 和 # Markdown标题
+        _hash_tag_line = re.compile(r'^#[\w\u4e00-\u9fff]+#')  # 匹配 #关键词# 格式
         for i, line in enumerate(lines):
             line_stripped = line.strip()
             if not line_stripped:
                 continue
-            if line_stripped.startswith("标题") or line_stripped.startswith("#"):
-                title = line_stripped.replace("标题：", "").replace("标题:", "").replace("# ", "").strip()
+            # 以「标题」前缀开头 → 标题
+            if line_stripped.startswith("标题"):
+                title = line_stripped.replace("标题：", "").replace("标题:", "").strip()
                 body_start = i + 1
                 break
-            elif len(line_stripped) <= 30 and i == 0:
+            # Markdown 标题 # xxx（不是 #tag# 格式）
+            if line_stripped.startswith("#") and not _hash_tag_line.match(line_stripped):
+                title = line_stripped.lstrip("#").strip()
+                body_start = i + 1
+                break
+            # 第一行短文本（<=30字）→ 标题
+            if i == 0 and len(line_stripped) <= 30:
                 title = line_stripped
                 body_start = i + 1
                 break
 
-        # 如果没找到标题，用第一行非空内容
+        # 如果没找到标题，用第一行非空且非标签的内容
         if not title:
             for line in lines:
-                if line.strip():
-                    title = line.strip()[:30]
+                s = line.strip()
+                if s and not _hash_tag_line.match(s):
+                    title = s[:30]
                     break
 
         # 构建正文（提取内联图片标记，句子级去重）
