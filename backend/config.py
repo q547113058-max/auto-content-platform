@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     IMAGE_GEN_PROVIDER: str = "agnes"  # agnes / seedream / tongyi-wanxiang
     IMAGE_GEN_API_KEY: Optional[str] = None
     IMAGE_GEN_API_BASE: str = "https://apihub.agnes-ai.com/v1"
-    IMAGE_GEN_MODEL: str = "agnes-image-2.0-flash"  # Agnes 图片模型
+    IMAGE_GEN_MODEL: str = "agnes-image-2.1-flash"  # Agnes 图片模型
 
     # --- 代理 IP ---
     PROXY_ENABLED: bool = False
