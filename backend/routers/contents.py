@@ -12,7 +12,8 @@ from backend.schemas.schemas import (
 )
 from sqlalchemy import select, func
 from pathlib import Path
-import re, datetime
+import re
+from backend.utils.timezone_utils import now_shanghai
 
 
 # ── 工具函数：把 image_paths 从本地路径/文件名转换成 HTTP URL ──
@@ -176,7 +177,7 @@ async def generate_content(
     ]
 
     # ── 预建临时 Content 记录（status=generating）──
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = now_shanghai()
     temp_contents = []
     for platform in platforms:
         temp = Content(

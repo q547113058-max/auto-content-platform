@@ -34,11 +34,17 @@ def _get_engine_kwargs(is_async: bool = False):
 
 @event.listens_for(Engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, connection_record):
-    """SQLite 优化：开启 WAL 模式 + 外键"""
+    """SQLite 优化：开启 WAL 模式 + 外键 + 东八区时间"""
     if settings.DB_TYPE == "sqlite":
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA foreign_keys=ON")
+        # SQLite CURRENT_TIMESTAMP 默认返回 UTC，注册函数返回东八区时间
+        def _shanghai_now():
+            from datetime import datetime, timezone, timedelta
+            return (datetime.now(timezone(timedelta(hours=8)))
+                    .strftime("%Y-%m-%d %H:%M:%S"))
+        dbapi_connection.create_function("localtime_now", 0, _shanghai_now)
         cursor.close()
 
 

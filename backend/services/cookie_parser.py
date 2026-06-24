@@ -7,7 +7,8 @@ Cookie 解析工具 — 将浏览器 Cookie 字符串解析为 Playwright Storag
 """
 from typing import List, Dict, Any, Optional
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
+from backend.utils.timezone_utils import now_shanghai
 from urllib.parse import urlparse
 
 
@@ -226,5 +227,5 @@ def _parse_expires(expires_str: str) -> float:
 
 
 def _one_year_from_now() -> float:
-    dt = datetime.now(timezone.utc) + timedelta(days=365)
+    dt = now_shanghai() + timedelta(days=365)
     return dt.timestamp()

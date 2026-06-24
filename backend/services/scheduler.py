@@ -3,8 +3,8 @@
 负责自动串联数据抓取→分析→优化→建议生成的完整闭环
 """
 import asyncio
-from datetime import datetime
 from loguru import logger
+from backend.utils.timezone_utils import now_shanghai
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
@@ -105,10 +105,10 @@ async def job_auto_optimize_loop():
 
             # Step 2: 找出有活跃内容的产品（近7天有发布/有新鲜数据）
             logger.info("[闭环] Step 2/4: 筛选活跃产品...")
-            from datetime import datetime as dt, timedelta
+            from datetime import timedelta
             from backend.models.models import PublishRecord, ContentMetric
 
-            seven_days_ago = dt.utcnow() - timedelta(days=7)
+            seven_days_ago = now_shanghai() - timedelta(days=7)
 
             # 查找有新抓取数据的产品
             active_product_query = (
@@ -148,7 +148,7 @@ async def job_auto_optimize_loop():
                 "scraped": scrape_result.get("scraped", 0),
                 "active_products": len(active_product_ids),
                 "new_suggestions": total_changes,
-                "timestamp": dt.utcnow().isoformat(),
+                "timestamp": now_shanghai().isoformat(),
             }
 
     except Exception as e:

@@ -1,6 +1,7 @@
 """数据分析 API — 支持可视化图表数据"""
 from typing import List, Optional
 from datetime import datetime, timedelta
+from backend.utils.timezone_utils import now_shanghai
 from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -134,7 +135,7 @@ async def get_trends(
     db: AsyncSession = Depends(get_db),
 ):
     """获取某产品的数据趋势 — 折线图使用"""
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = now_shanghai() - timedelta(days=days)
 
     query = text("""
         SELECT

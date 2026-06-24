@@ -17,7 +17,8 @@ import json
 import time
 import hashlib
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
+from backend.utils.timezone_utils import now_shanghai
 from typing import Optional, Dict, Any
 from loguru import logger
 from backend.config import settings
@@ -492,7 +493,7 @@ class SessionManager:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
 
         meta[account_id] = {
-            "last_check_at": datetime.now(timezone.utc).isoformat(),
+            "last_check_at": now_shanghai().isoformat(),
             "status": "active",
             "cookie_count": len(state.get("cookies", [])),
         }

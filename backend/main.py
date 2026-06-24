@@ -10,12 +10,34 @@ if sys.platform == "win32":
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from loguru import logger
 from backend.config import settings
 from backend.models.database import init_db, close_db
+
+# ── 全局时区：东八区 ──
+TZ_SHANGHAI = timezone(timedelta(hours=8))
+
+
+class ShanghaiJSONResponse(JSONResponse):
+    """自定义 JSON 响应：将 naive datetime 自动转为东八区时间"""
+    def render(self, content) -> bytes:
+        import json as _json
+
+        def _convert(obj):
+            if isinstance(obj, datetime):
+                if obj.tzinfo is None:
+                    obj = obj.replace(tzinfo=TZ_SHANGHAI)
+                return obj.isoformat()
+            raise TypeError
+
+        return _json.dumps(
+            content, ensure_ascii=False, default=_convert, separators=(",", ":")
+        ).encode("utf-8")
 
 
 @asynccontextmanager
@@ -51,6 +73,7 @@ app = FastAPI(
     version=settings.APP_VERSION,
     description="多平台图文内容自动化运营系统",
     lifespan=lifespan,
+    default_response_class=ShanghaiJSONResponse,
 )
 
 # CORS 配置
@@ -70,7 +93,7 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": __import__("datetime").datetime.now().isoformat()}
+    return {"status": "healthy", "timestamp": datetime.now(TZ_SHANGHAI).isoformat()}
 
 
 # ========== 静态文件 ==========

@@ -478,9 +478,10 @@ class DataScraper:
         定时批量采集 — 查询 90 天内成功发布的内容，逐个抓取最新数据
         """
         from sqlalchemy import select, and_
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta
+        from backend.utils.timezone_utils import now_shanghai
 
-        cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+        cutoff = now_shanghai() - timedelta(days=90)
         query = (
             select(PublishRecord)
             .where(

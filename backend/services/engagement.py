@@ -5,7 +5,7 @@
 from __future__ import annotations
 import asyncio
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from loguru import logger
 

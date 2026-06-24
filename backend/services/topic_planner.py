@@ -5,6 +5,7 @@
 """
 import random
 from datetime import datetime, timedelta
+from backend.utils.timezone_utils import now_shanghai
 from typing import Optional, List, Tuple, Dict, Any
 from loguru import logger
 
@@ -55,7 +56,7 @@ class TopicPlanner:
         topic_id = await cls._dedup_check(topic_id, product_id, platform, db)
 
         # 3. 记录使用时间
-        now = datetime.utcnow().isoformat()
+        now = now_shanghai().isoformat()
         key = f"{platform}:{topic_id}"
         last_used[key] = now
         topic_rotation["last_used"] = last_used
@@ -154,7 +155,7 @@ class TopicPlanner:
         from sqlalchemy import select, and_
         from backend.models.models import Content
 
-        cutoff = datetime.utcnow() - timedelta(days=DEDUP_WINDOW_DAYS)
+        cutoff = now_shanghai() - timedelta(days=DEDUP_WINDOW_DAYS)
         result = await db.execute(
             select(Content).where(
                 and_(
@@ -178,7 +179,7 @@ class TopicPlanner:
         from sqlalchemy import select, and_
         from backend.models.models import Content
 
-        cutoff = datetime.utcnow() - timedelta(days=DEDUP_WINDOW_DAYS)
+        cutoff = now_shanghai() - timedelta(days=DEDUP_WINDOW_DAYS)
         result = await db.execute(
             select(Content.topic_category).where(
                 and_(
@@ -227,7 +228,7 @@ class TopicPlanner:
             "phase": "explore",
             "topic_stats": {},
             "last_used": {},
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": now_shanghai().isoformat(),
         }
 
 

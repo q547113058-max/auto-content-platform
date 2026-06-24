@@ -10,7 +10,8 @@ from backend.models.models import PublishRecord, Content, PlatformAccount
 from backend.schemas.schemas import (
     PublishRequest, PublishResponse, APIResponse,
 )
-from datetime import datetime, timezone
+from datetime import datetime
+from backend.utils.timezone_utils import now_shanghai
 
 router = APIRouter()
 
@@ -156,7 +157,7 @@ async def _execute_publish(record_id: int):
             if result.get("success"):
                 record.status = "success"
                 record.external_content_id = str(result.get("content_id", ""))
-                record.publish_time = datetime.now(timezone.utc)
+                record.publish_time = now_shanghai()
                 content.status = "published"
                 logger.info(f"[{record.platform}] 发布成功: {record.id}")
             else:

@@ -25,7 +25,8 @@ class Optimizer:
         """
         from sqlalchemy import select, and_, func
         from backend.models.models import Content, PublishRecord, ContentMetric, Product
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta
+        from backend.utils.timezone_utils import now_shanghai
 
         # 1. 获取产品信息
         result = await db_session.execute(
@@ -170,10 +171,11 @@ class Optimizer:
         """
         from sqlalchemy import select
         from backend.models.models import OptimizationChange
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta
+        from backend.utils.timezone_utils import now_shanghai
 
         # 获取近期改动
-        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        cutoff = now_shanghai() - timedelta(days=30)
         result = await db_session.execute(
             select(OptimizationChange)
             .where(
