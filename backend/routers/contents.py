@@ -244,31 +244,29 @@ async def _run_generation_task(
 ):
     """后台异步执行 AI 生成，完成后更新 Content 记录"""
     from backend.tasks.content_tasks import generate_content_task
-    from backend.models.database import async_session
 
     try:
-        async with async_session() as db:
-            result = await generate_content_task(
-                db=db,
-                content_ids=content_ids,
-                product_id=product_id,
-                company_id=company_id,
-                content_mode=content_mode,
-                platforms=platforms,
-                override_prompt=override_prompt,
-                topic_category=topic_category,
-                auto_publish=auto_publish,
-            )
-            logger.info(f"[_run_generation_task] 完成：{result}")
+        result = await generate_content_task(
+            content_ids=content_ids,
+            product_id=product_id,
+            company_id=company_id,
+            content_mode=content_mode,
+            platforms=platforms,
+            override_prompt=override_prompt,
+            topic_category=topic_category,
+            auto_publish=auto_publish,
+        )
+        logger.info(f"[_run_generation_task] 完成：{result}")
 
     except Exception as e:
         import traceback
         logger.error(f"[_run_generation_task] 失败: {e}\n{traceback.format_exc()}")
         # 把失败的记录状态改为 draft，标题标记失败
         try:
-            async with async_session() as db:
-                from sqlalchemy import update
-                from backend.models.models import Content
+            from backend.models.database import AsyncSessionLocal
+            from sqlalchemy import update
+            from backend.models.models import Content
+            async with AsyncSessionLocal() as db:
                 await db.execute(
                     update(Content)
                     .where(Content.id.in_(content_ids))
